@@ -8,11 +8,11 @@
 /release/*.dll
 /release/*.ico
 /release/*.zip
-/release/PDFForge-1.0.3-Windows-x64-Portable/
+/release/PDFForge-1.0.4-Windows-x64-Portable/
 /release/macos/*.app/Contents/MacOS/PDFForge-bin
-!/release/PDFForge-Setup-1.0.3-Windows-x64.exe
-!/release/PDFForge-1.0.3-Windows-x64-Portable.zip
-!/release/PDFForge-1.0.3-macOS-Installer.zip
+!/release/PDFForge-Setup-1.0.4-Windows-x64.exe
+!/release/PDFForge-1.0.4-Windows-x64-Portable.zip
+!/release/PDFForge-1.0.4-macOS-Installer.zip
 
 # OS, Editor & Temporary files
 *.log

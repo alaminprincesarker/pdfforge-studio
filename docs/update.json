@@ -1,11 +1,11 @@
 {
-  "version": "1.0.3",
-  "tag": "v1.0.3",
-  "name": "PDFForge Studio v1.0.3 (Native Rust Edition)",
+  "version": "1.0.4",
+  "tag": "v1.0.4",
+  "name": "PDFForge Studio v1.0.4 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.3-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.4-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Fits opened pages by height automatically, adds Left/Right previous & next page navigation buttons and arrow-key support in normal windows, and anchors Zoom In/Out cleanly to the active page number."
+  "notes": "Adds two-click Fit to Width toggle (restores previous height-fit/zoom on second click) and removes on-page floating prev/next arrow overlays while keeping Left/Right keyboard page navigation."
 }
