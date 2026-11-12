@@ -1,11 +1,11 @@
 {
-  "version": "1.0.7",
-  "tag": "v1.0.7",
-  "name": "PDFForge Studio v1.0.7 (Native Rust Edition)",
+  "version": "1.0.8",
+  "tag": "v1.0.8",
+  "name": "PDFForge Studio v1.0.8 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.7-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.8-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Adds Page Fit & Read Mode toolbar dropdown (Fit to Width Scrolling, Fit One Full Page, Read Mode Ctrl+H) and fixes two-finger pinch/touchpad zoom for smooth large zooming up to 800% with finger-centered anchoring and safe high-DPI canvas scaling."
+  "notes": "Perfects two-finger zoom in and zoom out: adds sub-pixel float accumulation for precision touchpads with natural 0.0035 sensitivity, single-pass synchronous layout positioning anchored directly under fingers/cursor without jumps, and fluid touchscreen pinch chaining."
 }
