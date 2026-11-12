@@ -211,3 +211,4 @@ pub fn bring_window_to_front(window: &tao::window::Window) {
     win::bring_to_front(window);
     window.set_focus();
 }
+
