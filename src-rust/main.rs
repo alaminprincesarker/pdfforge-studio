@@ -588,7 +588,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.0.8';
+      return '1.0.9';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -1185,7 +1185,7 @@ fn main() {
 
     let webview = WebViewBuilder::with_web_context(&mut web_context)
         .with_background_color((37, 37, 43, 255))
-        .with_hotkeys_zoom(false)
+        .with_hotkeys_zoom(true)
         .with_initialization_script(&init_script)
         .with_drag_drop_handler(move |event| {
             match event {

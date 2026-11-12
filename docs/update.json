@@ -1,11 +1,11 @@
 {
-  "version": "1.0.8",
-  "tag": "v1.0.8",
-  "name": "PDFForge Studio v1.0.8 (Native Rust Edition)",
+  "version": "1.0.9",
+  "tag": "v1.0.9",
+  "name": "PDFForge Studio v1.0.9 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.8-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.9-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Perfects two-finger zoom in and zoom out: adds sub-pixel float accumulation for precision touchpads with natural 0.0035 sensitivity, single-pass synchronous layout positioning anchored directly under fingers/cursor without jumps, and fluid touchscreen pinch chaining."
+  "notes": "Fixes and perfects two-finger touchpad and touchscreen pinch zoom: re-enables WebView2 pinch-to-zoom routing with hotkeys zoom, enables pinch-zoom touch-action, and provides ultra-smooth centered scaling with sub-pixel float accumulation without scroll jumps."
 }
