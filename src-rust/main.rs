@@ -91,6 +91,12 @@ struct SaveDialogPayload {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenMultipleDialogPayload {
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveFileStatePayload {
     file_path: String,
     state: FileState,
@@ -231,6 +237,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     openFileListeners: new Set(),
     menuActionListeners: new Set(),
     pendingOpenFile: null,
+    pendingOpenFiles: [],
   };
 
   window.__pdfforgeNotifyMaximized = function (val) {
@@ -251,10 +258,20 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     if (!filePath) return;
     if (window.__pdfforgeState.openFileListeners.size === 0) {
       window.__pdfforgeState.pendingOpenFile = filePath;
+      if (!window.__pdfforgeState.pendingOpenFiles.includes(filePath)) {
+        window.__pdfforgeState.pendingOpenFiles.push(filePath);
+      }
     } else {
       window.__pdfforgeState.openFileListeners.forEach(function (cb) {
         try { cb(filePath); } catch (e) {}
       });
+    }
+  };
+
+  window.__pdfforgeNotifyOpenFiles = function (paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    for (var i = 0; i < paths.length; i++) {
+      window.__pdfforgeNotifyOpenFile(paths[i]);
     }
   };
 
@@ -331,8 +348,8 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     openFileDialog: async function () {
       return await apiPostJson('/dialog/openFile', {});
     },
-    openMultipleFilesDialog: async function () {
-      return await apiPostJson('/dialog/openMultipleFiles', {});
+    openMultipleFilesDialog: async function (title) {
+      return await apiPostJson('/dialog/openMultipleFiles', title ? { title: title } : {});
     },
     getPathForFile: function (file) {
       return (file && file.path) || '';
@@ -472,11 +489,22 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     // Listeners
     onFileOpenRequest: function (callback) {
       window.__pdfforgeState.openFileListeners.add(callback);
-      if (window.__pdfforgeState.pendingOpenFile) {
-        const pending = window.__pdfforgeState.pendingOpenFile;
-        window.__pdfforgeState.pendingOpenFile = null;
+      const pendingList = Array.isArray(window.__pdfforgeState.pendingOpenFiles)
+        ? window.__pdfforgeState.pendingOpenFiles.slice()
+        : [];
+      if (
+        window.__pdfforgeState.pendingOpenFile &&
+        !pendingList.includes(window.__pdfforgeState.pendingOpenFile)
+      ) {
+        pendingList.unshift(window.__pdfforgeState.pendingOpenFile);
+      }
+      window.__pdfforgeState.pendingOpenFile = null;
+      window.__pdfforgeState.pendingOpenFiles = [];
+      if (pendingList.length > 0) {
         setTimeout(function () {
-          try { callback(pending); } catch (e) {}
+          for (var i = 0; i < pendingList.length; i++) {
+            try { callback(pendingList[i]); } catch (e) {}
+          }
         }, 150);
       }
       return function () {
@@ -541,8 +569,10 @@ fn handle_api_request(
             });
         }
         "/__rust_api__/dialog/openMultipleFiles" => {
+            let payload: Option<OpenMultipleDialogPayload> = serde_json::from_slice(&body).ok();
+            let title = payload.and_then(|p| p.title);
             thread::spawn(move || {
-                let res = dialogs::open_multiple_files_dialog();
+                let res = dialogs::open_multiple_files_dialog_titled(title.as_deref());
                 responder.respond(json_response(StatusCode::OK, &res));
             });
         }
@@ -908,7 +938,7 @@ fn main() {
         let user_data_dir = store.lock().unwrap().user_data_dir().clone();
         ensure_webview2_loader_loaded(&user_data_dir);
     }
-    let cli_pdf = pdf_engine::parse_cli_pdf_arg();
+    let cli_pdfs = pdf_engine::parse_cli_pdf_args();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -934,10 +964,10 @@ fn main() {
     let proxy_for_drop = proxy.clone();
 
     let mut init_script = INIT_BRIDGE_SCRIPT.to_string();
-    if let Some(ref initial_pdf) = cli_pdf {
-        if let Ok(escaped) = serde_json::to_string(initial_pdf) {
+    if !cli_pdfs.is_empty() {
+        if let Ok(escaped) = serde_json::to_string(&cli_pdfs) {
             init_script.push_str(&format!(
-                "\nwindow.__pdfforgeNotifyOpenFile({});\n",
+                "\nwindow.__pdfforgeNotifyOpenFiles({});\n",
                 escaped
             ));
         }

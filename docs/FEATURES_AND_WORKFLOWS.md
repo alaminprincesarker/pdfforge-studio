@@ -30,8 +30,8 @@
 ### 1.4 Keyboard Shortcuts Summary
 | Shortcut | Action | Handler |
 |---|---|---|
-| `Ctrl+O` | Open PDF dialog | `GR` |
-| `Ctrl+W` | Close active document tab | `GR` |
+| `Ctrl+O` | Open one or multiple PDF documents into tabs (`__pdfforgePickAndOpenPDFs`) | `GR`, `C6` |
+| `Ctrl+W` | Close active document tab | `GR`, `C6` |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As | `C6` |
 | `Ctrl+P` | Open Print Studio Modal | `C6` -> `b6` |
 | `Ctrl+F` | Find in Document (`u6`) | `C6` |

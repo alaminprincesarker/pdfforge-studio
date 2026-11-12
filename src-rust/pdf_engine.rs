@@ -49,20 +49,33 @@ pub fn save_pdf_file(file_path: &str, data: &[u8]) -> SaveFileResponse {
     }
 }
 
-pub fn parse_cli_pdf_arg() -> Option<String> {
+pub fn parse_cli_pdf_args() -> Vec<String> {
+    let mut results = Vec::new();
     for arg in env::args().skip(1) {
         if !arg.starts_with("--") && arg.to_lowercase().ends_with(".pdf") {
             let path = PathBuf::from(&arg);
             if path.exists() {
-                if let Ok(abs) = fs::canonicalize(&path) {
+                let normalized = if let Ok(abs) = fs::canonicalize(&path) {
                     let s = abs.to_string_lossy().to_string();
                     // Strip Windows extended-length path prefix \\?\ if present
-                    return Some(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+                    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+                } else {
+                    arg
+                };
+                if !results
+                    .iter()
+                    .any(|p: &String| p.eq_ignore_ascii_case(&normalized))
+                {
+                    results.push(normalized);
                 }
-                return Some(arg);
             }
         }
     }
-    None
+    results
+}
+
+#[allow(dead_code)]
+pub fn parse_cli_pdf_arg() -> Option<String> {
+    parse_cli_pdf_args().into_iter().next()
 }
 

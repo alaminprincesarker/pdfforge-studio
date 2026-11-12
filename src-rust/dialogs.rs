@@ -55,9 +55,12 @@ pub fn open_file_dialog() -> OpenFileDialogResponse {
     }
 }
 
-pub fn open_multiple_files_dialog() -> OpenMultipleFilesDialogResponse {
+pub fn open_multiple_files_dialog_titled(title: Option<&str>) -> OpenMultipleFilesDialogResponse {
+    let dialog_title = title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or("Select PDF Documents to Combine");
     let picked = FileDialog::new()
-        .set_title("Select PDF Documents to Combine")
+        .set_title(dialog_title)
         .add_filter("PDF Documents", &["pdf"])
         .pick_files();
 
@@ -74,6 +77,10 @@ pub fn open_multiple_files_dialog() -> OpenMultipleFilesDialogResponse {
             file_paths: Vec::new(),
         },
     }
+}
+
+pub fn open_multiple_files_dialog() -> OpenMultipleFilesDialogResponse {
+    open_multiple_files_dialog_titled(None)
 }
 
 pub fn save_file_dialog(default_name: Option<&str>) -> SaveFileDialogResponse {
