@@ -49,25 +49,57 @@ pub fn save_pdf_file(file_path: &str, data: &[u8]) -> SaveFileResponse {
     }
 }
 
+fn normalize_cli_path_arg(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"');
+    if trimmed.is_empty() || trimmed.starts_with("--") || trimmed.starts_with('-') {
+        return None;
+    }
+    let decoded = if let Some(rest) = trimmed.strip_prefix("file:///") {
+        let bytes = rest.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let (Some(h), Some(l)) = (
+                    (bytes[i + 1] as char).to_digit(16),
+                    (bytes[i + 2] as char).to_digit(16),
+                ) {
+                    out.push(((h << 4) | l) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).replace('/', "\\")
+    } else {
+        trimmed.to_string()
+    };
+    if !decoded.to_lowercase().ends_with(".pdf") {
+        return None;
+    }
+    let path = PathBuf::from(&decoded);
+    if !path.exists() {
+        return None;
+    }
+    Some(if let Ok(abs) = fs::canonicalize(&path) {
+        let s = abs.to_string_lossy().to_string();
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    } else {
+        decoded
+    })
+}
+
 pub fn parse_cli_pdf_args() -> Vec<String> {
     let mut results = Vec::new();
     for arg in env::args().skip(1) {
-        if !arg.starts_with("--") && arg.to_lowercase().ends_with(".pdf") {
-            let path = PathBuf::from(&arg);
-            if path.exists() {
-                let normalized = if let Ok(abs) = fs::canonicalize(&path) {
-                    let s = abs.to_string_lossy().to_string();
-                    // Strip Windows extended-length path prefix \\?\ if present
-                    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
-                } else {
-                    arg
-                };
-                if !results
-                    .iter()
-                    .any(|p: &String| p.eq_ignore_ascii_case(&normalized))
-                {
-                    results.push(normalized);
-                }
+        if let Some(normalized) = normalize_cli_path_arg(&arg) {
+            if !results
+                .iter()
+                .any(|p: &String| p.eq_ignore_ascii_case(&normalized))
+            {
+                results.push(normalized);
             }
         }
     }

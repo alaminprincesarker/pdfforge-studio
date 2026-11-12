@@ -141,8 +141,12 @@ pub fn open_mailto_to(email: Option<&str>, subject: Option<&str>) {
     };
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd")
-            .args(["/C", "start", "", &target])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let ps = format!("Start-Process -FilePath '{}'", target.replace('\'', "''"));
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
     #[cfg(target_os = "macos")]
@@ -153,13 +157,22 @@ pub fn open_mailto_to(email: Option<&str>, subject: Option<&str>) {
 
 pub fn open_external_url(url: &str) -> bool {
     let trimmed = url.trim();
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+    if !(trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("mailto:"))
+    {
         return false;
     }
     #[cfg(target_os = "windows")]
     {
-        return Command::new("cmd")
-            .args(["/C", "start", "", trimmed])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // Use Start-Process via PowerShell so URLs containing '&', '?', '#', or spaces
+        // open reliably in the default browser without cmd.exe shell parsing issues.
+        let ps = format!("Start-Process -FilePath '{}'", trimmed.replace('\'', "''"));
+        return Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .is_ok();
     }

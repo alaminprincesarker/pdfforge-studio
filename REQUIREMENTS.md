@@ -58,4 +58,5 @@ Related documentation:
 | **Title bar menus & keyboard shortcuts** | `GR` (title bar menus) and `C6` (global `Ctrl+L`/`F11`/`Esc`/`Ctrl+F`/`Ctrl+S`/`Ctrl+P`/`Ctrl+=`/`-`/`0`) |
 | **Recent files, per-PDF last page/zoom, settings, signatures** | `src-rust/store.rs` (`AppDataStore`), `JR` (Home), `k6` (Preferences), `x6` (Signature modal) |
 | **In-app Updates, About / Publisher Info (`Md. Alamin`), Installer & Uninstaller** | `U6` (Update modal), `w6` (About modal), `src-rust/installer.rs`, `src-rust/app.rc`, `src-rust/app.manifest`, `src-rust/main.rs` (`/app/*` API routes) |
+| **Clickable PDF Links, Natural OS Printing, Unified Undo/Redo & Auto Fit-to-Window** | `a6` (native PDF links), `n6`/`g6`/`a5` (interactive `Add Link` tool & `pdf-lib` `/Link` export), `y6` (`PrintModal` with full markups & `onafterprint` focus restoration), `b6` (`histRef` unified annotation+rotation undo/redo, `ResizeObserver` responsive Fit-Width/Fit-Page), `src-rust/single_instance.rs` + `main.rs` (`/app/ready` single-window tab queueing) |
 

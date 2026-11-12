@@ -24,6 +24,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -33,16 +37,22 @@ pub struct AppSettings {
     pub enable_autosave: bool,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default = "default_false")]
+    pub auto_install_updates: bool,
+    #[serde(default = "default_true")]
+    pub auto_fit_on_open: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            default_zoom: 100.0,
+            default_zoom: 0.0,
             theme: "dark".to_string(),
             remember_last_page: true,
             enable_autosave: true,
             auto_check_updates: true,
+            auto_install_updates: false,
+            auto_fit_on_open: true,
         }
     }
 }
@@ -55,6 +65,8 @@ pub struct PartialAppSettings {
     pub remember_last_page: Option<bool>,
     pub enable_autosave: Option<bool>,
     pub auto_check_updates: Option<bool>,
+    pub auto_install_updates: Option<bool>,
+    pub auto_fit_on_open: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +148,12 @@ impl AppDataStore {
         }
         if let Some(auto_upd) = partial.auto_check_updates {
             current.auto_check_updates = auto_upd;
+        }
+        if let Some(auto_inst) = partial.auto_install_updates {
+            current.auto_install_updates = auto_inst;
+        }
+        if let Some(auto_fit) = partial.auto_fit_on_open {
+            current.auto_fit_on_open = auto_fit;
         }
         if let Ok(json) = serde_json::to_string_pretty(&current) {
             let _ = fs::write(&self.settings_file, json);

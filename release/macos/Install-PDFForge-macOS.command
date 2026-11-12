@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 echo "======================================================"
-echo "  PDFForge 1.0.0 - Native Rust macOS Installer"
+echo "  PDFForge 1.0.1 - Native Rust macOS Installer"
 echo "======================================================"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

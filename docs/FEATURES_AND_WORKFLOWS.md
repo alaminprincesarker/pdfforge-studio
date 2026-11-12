@@ -108,3 +108,15 @@
 - **Stack**: Rust (`tao` + `wry` WebView2 / WKWebView), React 18 UI, PDF.js, pdf-lib
 - **Manifest**: `src-rust/app.manifest` embeds Win10/11 `<compatibility>`, `<trustInfo level="asInvoker">`, PerMonitorV2 DPI awareness, and long-path support so Windows Smart App / PCA compatibility checks recognize native install/uninstall lifecycle cleanly.
 
+---
+
+## 6. v1.0.1 Release Enhancements
+
+- **Clickable Links & Add Link Tool**: `a6` extracts native PDF `Link` annotations (`url`, `unsafeUrl`, `dest`) via `getAnnotations({ intent: "display" })` for one-click external URL launch (`openExternalUrl` via PowerShell `Start-Process`) or internal destination jumps. The `Add Link` tool in `g6` / `n6` lets users place custom URL or page-jump links persisted cleanly into saved PDFs via `a5.applyAnnotations`.
+- **Natural Printing (`y6`)**: Only `Save as PDF (PDFForge)` opens a file-save dialog; `Microsoft Print to PDF` and physical printers render full page + annotation canvases cleanly, attach `onafterprint` cleanup (with 180s failsafe), close the modal, and restore window & viewer scroll focus.
+- **Unified Redo/Undo (`b6`, `n6`, `QR`)**: Tracks `{ anns, rot }` snapshots across annotations, rotation (`kt`), single-step drag/resize commits, inline text blur commits, and untouched `pageTextEdit` cleanup, reflected in `canUndo`/`canRedo` toolbar buttons.
+- **Unique Icons (`#5`)**: `Continuous Vertical Scrolling` (`vsI`), `Organize Pages` (`opI`), `Document Properties & Layers` (`ql`), and `Add Link` (`lkI`) each use distinct icons.
+- **GitHub Self-Updater (`#4`)**: `installer.rs` terminates lingering `PDFForge.exe` locks on silent install/update, retries binary copy, and supports optional background `autoInstallUpdates` or one-click banner **Auto-Update Now**.
+- **Single-Window Multi-Tab & Responsive Auto Fit-to-Window (`#6`, `#7`)**: `/app/ready` drains early multi-click `OpenFiles` IPC paths after React mounts (`Applications\PDFForge.exe` shell verb registered in HKCU), and newly opened PDFs open fitted cleanly to window width with tightened outer margins and `ResizeObserver` adaptation.
+
+

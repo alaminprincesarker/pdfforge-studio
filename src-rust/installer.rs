@@ -98,9 +98,33 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
     fn strip_zone_identifier(_path: &Path) {}
 
     if current_exe != target_exe {
-        let _ = fs::copy(current_exe, &target_exe);
+        #[cfg(target_os = "windows")]
+        {
+            // Ensure any lingering installed PDFForge.exe releases file locks before replacement
+            let ps_kill = format!(
+                "Get-Process -Name 'PDFForge' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {} }} | Stop-Process -Force -ErrorAction SilentlyContinue",
+                std::process::id()
+            );
+            run_hidden("powershell", &["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_kill]);
+        }
+        let mut copied = false;
+        for _ in 0..15 {
+            if fs::copy(current_exe, &target_exe).is_ok() {
+                copied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(180));
+        }
+        if !copied {
+            let _ = fs::copy(current_exe, &target_exe);
+        }
     }
-    let _ = fs::copy(current_exe, &uninstaller_exe);
+    for _ in 0..5 {
+        if fs::copy(current_exe, &uninstaller_exe).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
     let _ = fs::write(&app_ico_path, APP_ICO_BYTES);
     let _ = fs::write(&doc_ico_path, DOC_ICO_BYTES);
     // Ship the WebView2 loader next to the installed executable so it always starts.
@@ -149,6 +173,9 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
         let progid_cmd_key = r"HKCU\Software\Classes\PDFForge.Document\shell\open\command";
         let pdf_openwith_key = r"HKCU\Software\Classes\.pdf\OpenWithProgids";
         let app_paths_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\PDFForge.exe";
+        let app_reg_key = r"HKCU\Software\Classes\Applications\PDFForge.exe";
+        let app_reg_cmd_key = r"HKCU\Software\Classes\Applications\PDFForge.exe\shell\open\command";
+        let app_reg_types_key = r"HKCU\Software\Classes\Applications\PDFForge.exe\SupportedTypes";
 
         run_hidden("reg", &["add", progid_key, "/ve", "/t", "REG_SZ", "/d", "PDFForge PDF Document", "/f"]);
         run_hidden("reg", &["add", progid_icon_key, "/ve", "/t", "REG_SZ", "/d", &doc_icon, "/f"]);
@@ -156,6 +183,9 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
         run_hidden("reg", &["add", pdf_openwith_key, "/v", "PDFForge.Document", "/t", "REG_NONE", "/f"]);
         run_hidden("reg", &["add", app_paths_key, "/ve", "/t", "REG_SZ", "/d", &exe_str, "/f"]);
         run_hidden("reg", &["add", app_paths_key, "/v", "Path", "/t", "REG_SZ", "/d", &install_dir_str, "/f"]);
+        run_hidden("reg", &["add", app_reg_key, "/v", "FriendlyAppName", "/t", "REG_SZ", "/d", "PDFForge Studio", "/f"]);
+        run_hidden("reg", &["add", app_reg_cmd_key, "/ve", "/t", "REG_SZ", "/d", &open_cmd, "/f"]);
+        run_hidden("reg", &["add", app_reg_types_key, "/v", ".pdf", "/t", "REG_SZ", "/d", "", "/f"]);
 
         // 3. Create Desktop & Start Menu shortcuts (.lnk) with PDFForge icon
         let ps_script = format!(
@@ -339,7 +369,7 @@ pub fn apply_update_package(package_path: &str) -> Result<(), String> {
         let target_exe = get_default_install_dir().join("PDFForge.exe");
         let bat_path = std::env::temp_dir().join(format!("pdfforge_update_{}.cmd", std::process::id()));
         let bat_content = format!(
-            "@echo off\r\nping 127.0.0.1 -n 2 >nul\r\n\"{staged}\" --install-silent\r\ndel /f /q \"{staged}\" >nul 2>&1\r\nif exist \"{target}\" start \"\" \"{target}\"\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
+            "@echo off\r\nping 127.0.0.1 -n 2 >nul\r\ntaskkill /f /im PDFForge.exe >nul 2>&1\r\nping 127.0.0.1 -n 2 >nul\r\n\"{staged}\" --install-silent\r\ndel /f /q \"{staged}\" >nul 2>&1\r\nif exist \"{target}\" start \"\" \"{target}\"\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
             staged = staged.to_string_lossy(),
             target = target_exe.to_string_lossy()
         );

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tao::{
@@ -454,7 +455,14 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
 
     // System & App Info
     getAppVersion: async function () {
-      return '1.0.0-rust';
+      try {
+        const info = await apiPostJson('/app/getAppInfo', {});
+        if (info && info.version) return info.version;
+      } catch (e) {}
+      return '1.0.1';
+    },
+    appReady: async function () {
+      return await apiPostJson('/app/ready', {});
     },
     getAppInfo: async function () {
       return await apiPostJson('/app/getAppInfo', {});
@@ -509,6 +517,12 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
           }
         }, 150);
       }
+      // Flush any multi-click / IPC files queued in Rust before React mounted
+      apiPostJson('/app/ready', {}).then(function (res) {
+        if (res && Array.isArray(res.pendingFiles) && res.pendingFiles.length > 0) {
+          window.__pdfforgeNotifyOpenFiles(res.pendingFiles);
+        }
+      }).catch(function () {});
       return function () {
         window.__pdfforgeState.openFileListeners.delete(callback);
       };
@@ -561,6 +575,8 @@ fn handle_api_request(
     query: Option<&str>,
     body: Vec<u8>,
     store: Arc<Mutex<AppDataStore>>,
+    pending_boot_open_files: Arc<Mutex<Vec<String>>>,
+    webview_ready: Arc<AtomicBool>,
     responder: RequestAsyncResponder,
 ) {
     match uri_path {
@@ -913,6 +929,17 @@ fn handle_api_request(
                 responder.respond(json_response(StatusCode::OK, &printers));
             });
         }
+        "/__rust_api__/app/ready" => {
+            webview_ready.store(true, Ordering::SeqCst);
+            let drained: Vec<String> = {
+                let mut q = pending_boot_open_files.lock().unwrap();
+                std::mem::take(&mut *q)
+            };
+            responder.respond(json_response(
+                StatusCode::OK,
+                &json!({ "ok": true, "pendingFiles": drained }),
+            ));
+        }
         "/__rust_api__/diag" => {
             let msg = String::from_utf8_lossy(&body).to_string();
             let log_path = store.lock().unwrap().user_data_dir().join("startup_diag.log");
@@ -937,6 +964,8 @@ fn main() {
     let store = Arc::new(Mutex::new(AppDataStore::new()));
     let user_data_dir = store.lock().unwrap().user_data_dir().clone();
     let cli_pdfs = pdf_engine::parse_cli_pdf_args();
+    let pending_boot_open_files: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let webview_ready: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Enforce single-window architecture: clicking/opening additional PDF files forwards them
     // into the running window to open as new tabs, then exits the secondary launcher process.
@@ -974,6 +1003,8 @@ fn main() {
     let mut web_context = WebContext::new(Some(web_data_dir));
 
     let store_for_protocol = Arc::clone(&store);
+    let pending_boot_for_protocol = Arc::clone(&pending_boot_open_files);
+    let ready_for_protocol = Arc::clone(&webview_ready);
     let proxy_for_ipc = proxy.clone();
     let proxy_for_drop = proxy.clone();
 
@@ -1036,6 +1067,8 @@ fn main() {
                     query,
                     body,
                     Arc::clone(&store_for_protocol),
+                    Arc::clone(&pending_boot_for_protocol),
+                    Arc::clone(&ready_for_protocol),
                     responder,
                 );
                 return;
@@ -1250,11 +1283,20 @@ fn main() {
                         .filter(|p| !p.trim().is_empty() && p.to_lowercase().ends_with(".pdf"))
                         .collect();
                     if !pdfs.is_empty() {
-                        if let Ok(json_paths) = serde_json::to_string(&pdfs) {
-                            let _ = webview.evaluate_script(&format!(
-                                "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
-                                json_paths
-                            ));
+                        if webview_ready.load(Ordering::SeqCst) {
+                            if let Ok(json_paths) = serde_json::to_string(&pdfs) {
+                                let _ = webview.evaluate_script(&format!(
+                                    "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
+                                    json_paths
+                                ));
+                            }
+                        } else {
+                            let mut q = pending_boot_open_files.lock().unwrap();
+                            for p in &pdfs {
+                                if !q.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                                    q.push(p.clone());
+                                }
+                            }
                         }
                     }
                 }
@@ -1275,11 +1317,20 @@ fn main() {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
                 if !pdfs.is_empty() {
-                    if let Ok(json_paths) = serde_json::to_string(&pdfs) {
-                        let _ = webview.evaluate_script(&format!(
-                            "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
-                            json_paths
-                        ));
+                    if webview_ready.load(Ordering::SeqCst) {
+                        if let Ok(json_paths) = serde_json::to_string(&pdfs) {
+                            let _ = webview.evaluate_script(&format!(
+                                "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
+                                json_paths
+                            ));
+                        }
+                    } else {
+                        let mut q = pending_boot_open_files.lock().unwrap();
+                        for p in &pdfs {
+                            if !q.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                                q.push(p.clone());
+                            }
+                        }
                     }
                 }
             }

@@ -1,6 +1,6 @@
 [package]
 name = "pdfforge"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "PDFForge - 100% Offline Desktop PDF Reader & Editor (Rust Native Edition)"
 authors = ["Md. Alamin <alaminprincesarker@gmail.com>"]
