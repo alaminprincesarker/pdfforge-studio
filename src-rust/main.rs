@@ -3,6 +3,7 @@
 mod dialogs;
 mod installer;
 mod pdf_engine;
+mod single_instance;
 mod store;
 
 use http::{header::CONTENT_TYPE, Response, StatusCode};
@@ -75,6 +76,7 @@ enum UserEvent {
     DragEnter,
     DragLeave,
     DropFiles(Vec<String>),
+    OpenFiles(Vec<String>),
 }
 
 #[derive(Deserialize)]
@@ -933,15 +935,27 @@ fn main() {
     }
 
     let store = Arc::new(Mutex::new(AppDataStore::new()));
+    let user_data_dir = store.lock().unwrap().user_data_dir().clone();
+    let cli_pdfs = pdf_engine::parse_cli_pdf_args();
+
+    // Enforce single-window architecture: clicking/opening additional PDF files forwards them
+    // into the running window to open as new tabs, then exits the secondary launcher process.
+    let mut instance_guard = match single_instance::try_acquire_or_forward(&user_data_dir, &cli_pdfs) {
+        Some(guard) => guard,
+        None => return,
+    };
+
     #[cfg(target_os = "windows")]
     {
-        let user_data_dir = store.lock().unwrap().user_data_dir().clone();
         ensure_webview2_loader_loaded(&user_data_dir);
     }
-    let cli_pdfs = pdf_engine::parse_cli_pdf_args();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let proxy_for_single = proxy.clone();
+    single_instance::start_listener(&mut instance_guard, move |paths| {
+        let _ = proxy_for_single.send_event(UserEvent::OpenFiles(paths));
+    });
 
     let app_icon = tao::window::Icon::from_rgba(ICON_RGBA_BYTES.to_vec(), 64, 64).ok();
 
@@ -1089,6 +1103,12 @@ fn main() {
                 }
             }
         })
+        .with_new_window_req_handler(|url| {
+            if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") {
+                dialogs::open_external_url(&url);
+            }
+            false
+        })
         .with_url("pdfforge://localhost/index.html")
         .build(&window)
         .expect("Failed to initialize Rust WebView2");
@@ -1107,6 +1127,7 @@ fn main() {
     };
 
     event_loop.run(move |event, _, control_flow| {
+        let _keep_instance_guard = &instance_guard;
         *control_flow = ControlFlow::Wait;
 
         match event {
@@ -1221,7 +1242,47 @@ fn main() {
                         );
                     }
                 }
+                UserEvent::OpenFiles(paths) => {
+                    single_instance::bring_window_to_front(&window);
+                    let _ = webview.focus();
+                    let pdfs: Vec<String> = paths
+                        .into_iter()
+                        .filter(|p| !p.trim().is_empty() && p.to_lowercase().ends_with(".pdf"))
+                        .collect();
+                    if !pdfs.is_empty() {
+                        if let Ok(json_paths) = serde_json::to_string(&pdfs) {
+                            let _ = webview.evaluate_script(&format!(
+                                "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
+                                json_paths
+                            ));
+                        }
+                    }
+                }
             },
+            #[cfg(target_os = "macos")]
+            Event::Opened { urls } => {
+                single_instance::bring_window_to_front(&window);
+                let _ = webview.focus();
+                let pdfs: Vec<String> = urls
+                    .into_iter()
+                    .filter_map(|u| u.to_file_path().ok())
+                    .filter(|p| {
+                        p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.eq_ignore_ascii_case("pdf"))
+                            .unwrap_or(false)
+                    })
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                if !pdfs.is_empty() {
+                    if let Ok(json_paths) = serde_json::to_string(&pdfs) {
+                        let _ = webview.evaluate_script(&format!(
+                            "window.__pdfforgeNotifyOpenFiles && window.__pdfforgeNotifyOpenFiles({});",
+                            json_paths
+                        ));
+                    }
+                }
+            }
             _ => {}
         }
     });
