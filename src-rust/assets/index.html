@@ -14,6 +14,14 @@
       html, body, #root {
         touch-action: pan-x pan-y;
         overscroll-behavior: none;
+        border: none !important;
+        outline: none !important;
+      }
+      *:focus, *:focus-visible {
+        outline: none !important;
+      }
+      ::-webkit-scrollbar-corner {
+        background: transparent !important;
       }
       .textLayer, .textLayer span, .textLayer br, .select-text {
         -webkit-user-select: text !important;

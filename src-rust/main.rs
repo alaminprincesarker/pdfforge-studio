@@ -65,6 +65,114 @@ fn ensure_webview2_loader_loaded(app_data_dir: &std::path::Path) {
     }
 }
 
+#[cfg(target_os = "windows")]
+mod win32_frame {
+    use core::ffi::c_void;
+    use tao::platform::windows::WindowExtWindows;
+
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
+    const DWMWCP_DEFAULT: i32 = 0;
+    const DWMWCP_DONOTROUND: i32 = 1;
+    const GCLP_HBRBACKGROUND: i32 = -10;
+    const SW_HIDE: i32 = 0;
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            dwAttribute: u32,
+            pvAttribute: *const c_void,
+            cbAttribute: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> isize;
+    }
+
+    extern "system" {
+        fn SetClassLongPtrW(hwnd: isize, nIndex: i32, dwNewLong: isize) -> isize;
+        fn ShowWindow(hwnd: isize, nCmdShow: i32) -> i32;
+    }
+
+    pub fn apply_frameless_appearance(window: &tao::window::Window, sharp_corners: bool) {
+        let hwnd = window.hwnd() as isize;
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            let dark: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const i32 as *const c_void,
+                4,
+            );
+            let border_none: u32 = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &border_none as *const u32 as *const c_void,
+                4,
+            );
+            let corner_pref: i32 = if sharp_corners {
+                DWMWCP_DONOTROUND
+            } else {
+                DWMWCP_DEFAULT
+            };
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_pref as *const i32 as *const c_void,
+                4,
+            );
+            // #25252b in BGR COLORREF so non-client/background never flashes white or classic gray
+            let dark_brush = CreateSolidBrush(0x002B2525);
+            if dark_brush != 0 {
+                let _ = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, dark_brush);
+            }
+        }
+    }
+
+    pub fn set_transitions_disabled(window: &tao::window::Window, disabled: bool) {
+        let hwnd = window.hwnd() as isize;
+        if hwnd == 0 {
+            return;
+        }
+        let val: i32 = if disabled { 1 } else { 0 };
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &val as *const i32 as *const c_void,
+                4,
+            );
+        }
+    }
+
+    pub fn hide_instantly_before_close(window: &tao::window::Window) {
+        let hwnd = window.hwnd() as isize;
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            let val: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &val as *const i32 as *const c_void,
+                4,
+            );
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum UserEvent {
     Minimize,
@@ -480,7 +588,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.0.5';
+      return '1.0.6';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -1052,6 +1160,10 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create native Rust window");
 
+    single_instance::register_window(&instance_guard, &window);
+    #[cfg(target_os = "windows")]
+    win32_frame::apply_frameless_appearance(&window, true);
+
     let web_data_dir = store.lock().unwrap().user_data_dir().join("webview2");
     let mut web_context = WebContext::new(Some(web_data_dir));
 
@@ -1221,6 +1333,9 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                #[cfg(target_os = "windows")]
+                win32_frame::hide_instantly_before_close(&window);
+                window.set_visible(false);
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
@@ -1237,6 +1352,8 @@ fn main() {
                     ));
                 }
                 let is_fs = window.fullscreen().is_some();
+                #[cfg(target_os = "windows")]
+                win32_frame::apply_frameless_appearance(&window, is_fs || is_max);
                 if is_fs != last_fullscreen {
                     last_fullscreen = is_fs;
                     let _ = webview.evaluate_script(&format!(
@@ -1252,6 +1369,8 @@ fn main() {
                 UserEvent::Maximize => {
                     window.set_maximized(true);
                     last_maximized = true;
+                    #[cfg(target_os = "windows")]
+                    win32_frame::apply_frameless_appearance(&window, true);
                     sync_webview_bounds(&window, &webview);
                     let _ = webview.evaluate_script(
                         "window.__pdfforgeNotifyMaximized && window.__pdfforgeNotifyMaximized(true);",
@@ -1260,12 +1379,17 @@ fn main() {
                 UserEvent::Unmaximize => {
                     window.set_maximized(false);
                     last_maximized = false;
+                    #[cfg(target_os = "windows")]
+                    win32_frame::apply_frameless_appearance(&window, window.fullscreen().is_some());
                     sync_webview_bounds(&window, &webview);
                     let _ = webview.evaluate_script(
                         "window.__pdfforgeNotifyMaximized && window.__pdfforgeNotifyMaximized(false);",
                     );
                 }
                 UserEvent::Close => {
+                    #[cfg(target_os = "windows")]
+                    win32_frame::hide_instantly_before_close(&window);
+                    window.set_visible(false);
                     *control_flow = ControlFlow::Exit;
                 }
                 fs_ev @ (UserEvent::ToggleFullScreen | UserEvent::SetFullScreen(_)) => {
@@ -1273,6 +1397,8 @@ fn main() {
                         UserEvent::SetFullScreen(val) => val,
                         _ => window.fullscreen().is_none(),
                     };
+                    #[cfg(target_os = "windows")]
+                    win32_frame::set_transitions_disabled(&window, true);
                     if next {
                         if !last_fullscreen {
                             was_maximized_before_fs = window.is_maximized();
@@ -1289,6 +1415,11 @@ fn main() {
                     }
                     last_fullscreen = next;
                     let now_max = window.is_maximized();
+                    #[cfg(target_os = "windows")]
+                    {
+                        win32_frame::apply_frameless_appearance(&window, next || now_max);
+                        win32_frame::set_transitions_disabled(&window, false);
+                    }
                     sync_webview_bounds(&window, &webview);
                     window.set_focus();
                     let _ = webview.focus();
