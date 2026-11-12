@@ -1,11 +1,11 @@
 {
-  "version": "1.0.6",
-  "tag": "v1.0.6",
-  "name": "PDFForge Studio v1.0.6 (Native Rust Edition)",
+  "version": "1.0.7",
+  "tag": "v1.0.7",
+  "name": "PDFForge Studio v1.0.7 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.6-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.7-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Opens files on the active Windows Virtual Desktop without jumping between desktops, removes white DWM/corner borders in full-screen mode, enables smooth drag-and-drop tab reordering in the tab bar, and eliminates classic frame flashes when closing maximized or full-screen windows."
+  "notes": "Adds Page Fit & Read Mode toolbar dropdown (Fit to Width Scrolling, Fit One Full Page, Read Mode Ctrl+H) and fixes two-finger pinch/touchpad zoom for smooth large zooming up to 800% with finger-centered anchoring and safe high-DPI canvas scaling."
 }
