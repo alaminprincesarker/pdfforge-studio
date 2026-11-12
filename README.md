@@ -56,6 +56,9 @@ The compiled executable is output to `target\release\PDFForge-Rust.exe` and copi
 - **Version**: `1.0.0` (Native Rust Edition)
 - **Developer / Publisher**: **Md. Alamin**
 - **Contact Email**: `alaminprincesarker@gmail.com`
+- **GitHub Repository**: [https://github.com/alaminprincesarker/pdfforge-studio](https://github.com/alaminprincesarker/pdfforge-studio)
+- **Website & Downloads**: [https://alaminprincesarker.github.io/pdfforge-studio/](https://alaminprincesarker.github.io/pdfforge-studio/)
+- **Releases**: [https://github.com/alaminprincesarker/pdfforge-studio/releases](https://github.com/alaminprincesarker/pdfforge-studio/releases)
 - **Runtime Stack**: Native Rust (`tao` + `wry` WebView2/WKWebView), React 18 UI, PDF.js, pdf-lib
 - **Privacy & License**: 100% Offline, Zero Cloud Telemetry, MIT Open License
-- **Internal Updater**: `Help -> Check for Updates...` supports offline `.exe` upgrades, local/remote manifest checks, installation repair, and clean uninstall (`--uninstall` / `--uninstall-silent`) without Windows PCA compatibility warnings.
+- **Internal Updater**: `Help -> Check for Updates...` supports offline `.exe` upgrades, local/remote manifest checks (`https://alaminprincesarker.github.io/pdfforge-studio/update.json`), installation repair, and clean uninstall (`--uninstall` / `--uninstall-silent`) without Windows PCA compatibility warnings.

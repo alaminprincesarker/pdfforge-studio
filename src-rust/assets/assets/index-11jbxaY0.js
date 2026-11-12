@@ -759,7 +759,9 @@ ${l}
                     u.jsxs("div",{children:[u.jsx("div",{className:"text-gray-400",children:"Supported Targets"}),u.jsx("div",{className:"text-gray-200",children:"Windows 10/11 (x64) • macOS"})]}),
                     u.jsxs("div",{children:[u.jsx("div",{className:"text-gray-400",children:"Installer & Release Format"}),u.jsx("div",{className:"text-gray-200",children:"EXE Installer • Portable ZIP • Winget/Store Ready"})]}),
                     u.jsxs("div",{children:[u.jsx("div",{className:"text-gray-400",children:"License & Privacy Declaration"}),u.jsx("div",{className:"text-gray-200",children:"MIT License • No Telemetry / No Ads"})]}),
-                    u.jsxs("div",{className:"col-span-2",children:[u.jsx("div",{className:"text-gray-400",children:"Core Runtime Stack"}),u.jsx("div",{className:"text-gray-200",children:p})]})
+                    u.jsxs("div",{className:"col-span-2",children:[u.jsx("div",{className:"text-gray-400",children:"Core Runtime Stack"}),u.jsx("div",{className:"text-gray-200",children:p})]}),
+                    u.jsxs("div",{children:[u.jsx("div",{className:"text-gray-400",children:"GitHub Repository"}),u.jsx("button",{type:"button",onClick:()=>window.electronAPI&&window.electronAPI.openExternalUrl((i&&i.repository)||"https://github.com/alaminprincesarker/pdfforge-studio"),className:"text-blue-300 hover:text-blue-200 underline decoration-blue-500/50 text-left",children:"alaminprincesarker/pdfforge-studio"})]}),
+                    u.jsxs("div",{children:[u.jsx("div",{className:"text-gray-400",children:"Website & Releases"}),u.jsx("button",{type:"button",onClick:()=>window.electronAPI&&window.electronAPI.openExternalUrl((i&&i.website)||"https://alaminprincesarker.github.io/pdfforge-studio/"),className:"text-blue-300 hover:text-blue-200 underline decoration-blue-500/50 text-left",children:"alaminprincesarker.github.io/pdfforge-studio"})]})
                   ]
                 })
               ]
@@ -944,8 +946,18 @@ ${l}
                   type:"url",
                   value:c,
                   onChange:w=>d(w.target.value),
-                  placeholder:"Optional HTTPS release JSON / GitHub API URL (leave blank for offline scan)",
+                  placeholder:"https://alaminprincesarker.github.io/pdfforge-studio/update.json (or leave blank for offline scan)",
                   className:"w-full px-3 py-1.5 bg-[#16161b] border border-[#383842] rounded text-white text-[11px] outline-none focus:border-accent"
+                }),
+                u.jsxs("div",{
+                  className:"flex flex-wrap items-center gap-1.5 text-[10px]",
+                  children:[
+                    u.jsx("span",{className:"text-gray-400 mr-0.5",children:"Source:"}),
+                    u.jsx("button",{type:"button",onClick:()=>d(""),className:"px-2 py-0.5 rounded bg-[#25252e] hover:bg-[#32323e] text-gray-300 border border-[#363643]",children:"Offline Scan"}),
+                    u.jsx("button",{type:"button",onClick:()=>d("https://alaminprincesarker.github.io/pdfforge-studio/update.json"),className:"px-2 py-0.5 rounded bg-[#25252e] hover:bg-[#32323e] text-blue-300 border border-[#363643]",children:"GitHub Pages JSON"}),
+                    u.jsx("button",{type:"button",onClick:()=>d("https://api.github.com/repos/alaminprincesarker/pdfforge-studio/releases/latest"),className:"px-2 py-0.5 rounded bg-[#25252e] hover:bg-[#32323e] text-purple-300 border border-[#363643]",children:"GitHub Releases API"}),
+                    u.jsx("button",{type:"button",onClick:()=>window.electronAPI&&window.electronAPI.openExternalUrl("https://github.com/alaminprincesarker/pdfforge-studio/releases"),className:"ml-auto px-2 py-0.5 rounded bg-[#25252e] hover:bg-[#32323e] text-emerald-300 border border-[#363643]",children:"Open Releases Page"})
+                  ]
                 }),
                 u.jsxs("div",{
                   className:"flex items-center space-x-2",

@@ -5,6 +5,8 @@ edition = "2021"
 description = "PDFForge - 100% Offline Desktop PDF Reader & Editor (Rust Native Edition)"
 authors = ["Md. Alamin <alaminprincesarker@gmail.com>"]
 license = "MIT"
+repository = "https://github.com/alaminprincesarker/pdfforge-studio"
+homepage = "https://alaminprincesarker.github.io/pdfforge-studio/"
 
 [[bin]]
 name = "PDFForge-Rust"

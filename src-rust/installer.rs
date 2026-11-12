@@ -119,6 +119,8 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
         run_hidden("reg", &["add", uninst_key, "/v", "Publisher", "/t", "REG_SZ", "/d", "Md. Alamin (PDFForge Studio)", "/f"]);
         run_hidden("reg", &["add", uninst_key, "/v", "Contact", "/t", "REG_SZ", "/d", "alaminprincesarker@gmail.com", "/f"]);
         run_hidden("reg", &["add", uninst_key, "/v", "HelpLink", "/t", "REG_SZ", "/d", "mailto:alaminprincesarker@gmail.com", "/f"]);
+        run_hidden("reg", &["add", uninst_key, "/v", "URLInfoAbout", "/t", "REG_SZ", "/d", "https://github.com/alaminprincesarker/pdfforge-studio", "/f"]);
+        run_hidden("reg", &["add", uninst_key, "/v", "URLUpdateInfo", "/t", "REG_SZ", "/d", "https://alaminprincesarker.github.io/pdfforge-studio/", "/f"]);
         run_hidden("reg", &["add", uninst_key, "/v", "Comments", "/t", "REG_SZ", "/d", "Offline Native Rust PDF Reader & Editor by Md. Alamin", "/f"]);
         run_hidden("reg", &["add", uninst_key, "/v", "DisplayIcon", "/t", "REG_SZ", "/d", &display_icon, "/f"]);
         run_hidden("reg", &["add", uninst_key, "/v", "InstallLocation", "/t", "REG_SZ", "/d", &install_dir_str, "/f"]);

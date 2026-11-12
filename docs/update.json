@@ -4,7 +4,7 @@
   "name": "PDFForge Studio v1.0.0 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
-  "downloadUrl": "",
+  "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases/latest",
   "notes": "Initial Native Rust Edition release (tao + wry WebView2, offline PDF.js + pdf-lib, Page Organizer, Print Studio, Full Screen Presentation HUD, Edit Page Text/Images, and Clean Uninstaller)."
 }
-
