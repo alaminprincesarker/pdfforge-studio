@@ -1,11 +1,11 @@
 {
-  "version": "1.0.4",
-  "tag": "v1.0.4",
-  "name": "PDFForge Studio v1.0.4 (Native Rust Edition)",
+  "version": "1.0.5",
+  "tag": "v1.0.5",
+  "name": "PDFForge Studio v1.0.5 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.4-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.5-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Adds two-click Fit to Width toggle (restores previous height-fit/zoom on second click) and removes on-page floating prev/next arrow overlays while keeping Left/Right keyboard page navigation."
+  "notes": "Fixes initial open auto-scroll drift, smooths zoom steps to 5-8% across toolbar buttons, Ctrl+/- shortcuts, and Ctrl+wheel while keeping zoom centered, and adds automatic fit-to-height centering and resize adaptation in full-screen mode with exact zoom and scroll restore on exit."
 }
