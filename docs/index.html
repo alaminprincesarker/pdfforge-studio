@@ -854,6 +854,18 @@
 
       <div class="notice-box">
         <div>
+          <strong>Windows SmartScreen / macOS Gatekeeper Note:</strong>
+          <span style="font-size:13px;color:var(--muted);margin-left:6px;">
+            Open-source binaries built before commercial CA / Apple Developer ID signing are configured in GitHub Secrets show an OS verification prompt on first download:
+            <strong>Windows</strong> &rarr; click <em>More info &rarr; Run anyway</em> (or run <code>Unblock-File</code>);
+            <strong>macOS</strong> &rarr; run <code>Install-PDFForge-macOS.command</code> (clears quarantine &amp; ad-hoc signs for Apple Silicon/Intel).
+            <a href="https://github.com/alaminprincesarker/pdfforge-studio/blob/main/docs/SIGNING_AND_TRUST_SETUP.md" target="_blank" rel="noopener">Enable zero-prompt Azure Trusted Signing / Apple Notarization &rarr;</a>
+          </span>
+        </div>
+      </div>
+
+      <div class="notice-box">
+        <div>
           <strong>Internal App Updater Manifest URL:</strong>
           <code id="update-manifest-url" style="margin-left:6px;color:#93c5fd;">https://alaminprincesarker.github.io/pdfforge-studio/update.json</code>
           <div style="font-size:12px;color:var(--muted);margin-top:4px;">PDFForge Studio automatically checks GitHub on startup and notifies you when a new release arrives — or open <strong>Help &rarr; Check for Updates...</strong> manually.</div>

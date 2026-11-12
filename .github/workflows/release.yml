@@ -31,13 +31,52 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $exe = "target\x86_64-pc-windows-gnu\release\PDFForge-Rust.exe"
           Copy-Item $exe "dist\PDFForge-Setup-1.0.0-Windows-x64.exe" -Force
-          New-Item -ItemType Directory -Force dist\portable | Out-Null
-          Copy-Item $exe "dist\portable\PDFForge.exe" -Force
-          Copy-Item "src-rust\icon.ico" "dist\portable\PDFForge.ico" -Force
-          Copy-Item "src-rust\WebView2Loader.dll" "dist\portable\WebView2Loader.dll" -Force
-          (Get-Item "dist\portable\WebView2Loader.dll").LastWriteTime = Get-Date
+          New-Item -ItemType Directory -Force dist\PDFForge-1.0.0-Windows-x64-Portable | Out-Null
+          Copy-Item $exe "dist\PDFForge-1.0.0-Windows-x64-Portable\PDFForge.exe" -Force
+          Copy-Item "src-rust\icon.ico" "dist\PDFForge-1.0.0-Windows-x64-Portable\PDFForge.ico" -Force
+          Copy-Item "src-rust\WebView2Loader.dll" "dist\PDFForge-1.0.0-Windows-x64-Portable\WebView2Loader.dll" -Force
+          (Get-Item "dist\PDFForge-1.0.0-Windows-x64-Portable\WebView2Loader.dll").LastWriteTime = Get-Date
+      - name: Azure Trusted Signing (Removes SmartScreen Unknown Publisher Globally)
+        if: env.AZURE_CLIENT_ID != '' && env.AZURE_TS_ENDPOINT != ''
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TS_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TS_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: PFX Authenticode Signing (Fallback if CA PFX Secret Provided)
+        if: env.AZURE_CLIENT_ID == '' && env.WINDOWS_PFX_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\pdfforge_codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $env:WINDOWS_PFX_PASSWORD)
+          Get-ChildItem dist -Filter *.exe -Recurse | ForEach-Object {
+            Set-AuthenticodeSignature -FilePath $_.FullName -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com" | Out-Null
+          }
+          Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+      - name: Package Windows Portable ZIP
+        shell: pwsh
+        run: |
           Push-Location dist
-          tar -a -c -f "PDFForge-1.0.0-Windows-x64-Portable.zip" "portable"
+          (Get-Item "PDFForge-1.0.0-Windows-x64-Portable\WebView2Loader.dll").LastWriteTime = Get-Date
+          tar -a -c -f "PDFForge-1.0.0-Windows-x64-Portable.zip" "PDFForge-1.0.0-Windows-x64-Portable"
           Pop-Location
       - uses: actions/upload-artifact@v4
         with:
@@ -50,23 +89,77 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build Native macOS Binary
-        run: cargo build --release
-      - name: Bundle PDFForge.app Installer ZIP
+      - name: Install Rust (Apple Silicon + Intel Universal Targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build Universal macOS Binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/universal-release
+          lipo -create -output target/universal-release/PDFForge-Rust \
+            target/aarch64-apple-darwin/release/PDFForge-Rust \
+            target/x86_64-apple-darwin/release/PDFForge-Rust
+      - name: Bundle, Sign & Notarize macOS App + DMG
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           mkdir -p dist/macos
           cp -R release/macos/* dist/macos/
-          cp target/release/PDFForge-Rust dist/macos/PDFForge.app/Contents/MacOS/PDFForge-bin
+          cp target/universal-release/PDFForge-Rust dist/macos/PDFForge.app/Contents/MacOS/PDFForge-bin
           chmod +x dist/macos/PDFForge.app/Contents/MacOS/PDFForge-bin
           chmod +x dist/macos/PDFForge.app/Contents/MacOS/PDFForge
           chmod +x dist/macos/Install-PDFForge-macOS.command
+          xattr -cr dist/macos/PDFForge.app || true
+
+          if [ -n "$APPLE_CERT_BASE64" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+            KEYCHAIN_PASS="pdfforge-ci-temp"
+            CERT_PATH="$RUNNER_TEMP/apple-dev-id.p12"
+            echo "$APPLE_CERT_BASE64" | base64 --decode > "$CERT_PATH"
+            security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+            codesign --force --deep --options runtime --timestamp \
+              --entitlements release/macos/entitlements.plist \
+              --sign "$APPLE_SIGNING_IDENTITY" dist/macos/PDFForge.app
+
+            hdiutil create -volname "PDFForge Studio" -srcfolder dist/macos/PDFForge.app \
+              -ov -format UDZO "dist/PDFForge-1.0.0-macOS-Universal.dmg"
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "dist/PDFForge-1.0.0-macOS-Universal.dmg"
+
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+              xcrun notarytool submit "dist/PDFForge-1.0.0-macOS-Universal.dmg" \
+                --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+              xcrun stapler staple "dist/PDFForge.app" || true
+              xcrun stapler staple "dist/PDFForge-1.0.0-macOS-Universal.dmg"
+            fi
+          else
+            codesign --force --deep --options runtime \
+              --entitlements release/macos/entitlements.plist \
+              --sign - dist/macos/PDFForge.app
+            hdiutil create -volname "PDFForge Studio" -srcfolder dist/macos/PDFForge.app \
+              -ov -format UDZO "dist/PDFForge-1.0.0-macOS-Universal.dmg" || true
+          fi
+
           cd dist
           zip -r -y "PDFForge-1.0.0-macOS-Installer.zip" macos
       - uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
-          path: dist/PDFForge-1.0.0-macOS-Installer.zip
+          path: |
+            dist/PDFForge-1.0.0-macOS-Installer.zip
+            dist/PDFForge-1.0.0-macOS-Universal.dmg
 
   publish-release:
     needs: [build-windows, build-macos]
@@ -83,4 +176,3 @@ jobs:
           files: |
             release-files/windows-artifacts/*
             release-files/macos-artifacts/*
-

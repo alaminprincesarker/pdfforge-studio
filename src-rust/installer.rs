@@ -88,6 +88,15 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
     let app_ico_path = install_dir.join("PDFForge.ico");
     let doc_ico_path = install_dir.join("PDFForge-Document.ico");
 
+    #[cfg(target_os = "windows")]
+    fn strip_zone_identifier(path: &Path) {
+        let ads = format!("{}:Zone.Identifier", path.to_string_lossy());
+        let _ = fs::remove_file(ads);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn strip_zone_identifier(_path: &Path) {}
+
     if current_exe != target_exe {
         let _ = fs::copy(current_exe, &target_exe);
     }
@@ -95,7 +104,11 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
     let _ = fs::write(&app_ico_path, APP_ICO_BYTES);
     let _ = fs::write(&doc_ico_path, DOC_ICO_BYTES);
     // Ship the WebView2 loader next to the installed executable so it always starts.
-    let _ = fs::write(install_dir.join("WebView2Loader.dll"), crate::WEBVIEW2_LOADER_BYTES);
+    let loader_path = install_dir.join("WebView2Loader.dll");
+    let _ = fs::write(&loader_path, crate::WEBVIEW2_LOADER_BYTES);
+    strip_zone_identifier(&target_exe);
+    strip_zone_identifier(&uninstaller_exe);
+    strip_zone_identifier(&loader_path);
 
     #[cfg(target_os = "windows")]
     {
@@ -321,6 +334,7 @@ pub fn apply_update_package(package_path: &str) -> Result<(), String> {
 
         let staged = std::env::temp_dir().join(format!("PDFForge-Update-{}.exe", std::process::id()));
         fs::copy(src, &staged).map_err(|e| format!("Failed to stage update package: {}", e))?;
+        let _ = fs::remove_file(format!("{}:Zone.Identifier", staged.to_string_lossy()));
 
         let target_exe = get_default_install_dir().join("PDFForge.exe");
         let bat_path = std::env::temp_dir().join(format!("pdfforge_update_{}.cmd", std::process::id()));

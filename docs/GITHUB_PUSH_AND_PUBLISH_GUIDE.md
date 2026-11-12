@@ -40,3 +40,8 @@ Because large binaries (`.exe` / `.zip` / `target/`) are excluded by `.gitignore
    **[https://alaminprincesarker.github.io/pdfforge-studio/](https://alaminprincesarker.github.io/pdfforge-studio/)**
 
 All Download buttons on the website point directly to your `v1.0.0` release assets, and `Help -> Check for Updates...` inside PDFForge Studio can check `https://alaminprincesarker.github.io/pdfforge-studio/update.json` or `https://api.github.com/repos/alaminprincesarker/pdfforge-studio/releases/latest`.
+
+---
+
+## Step 4 — Remove SmartScreen (`Unknown publisher`) & macOS Gatekeeper Warnings Worldwide
+See [SIGNING_AND_TRUST_SETUP.md](SIGNING_AND_TRUST_SETUP.md) for configuring **Azure Trusted Signing / SignPath.io / PFX** (Windows) and **Apple Developer ID Notarization** (macOS) in `.github/workflows/release.yml`.
