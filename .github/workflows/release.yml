@@ -1,0 +1,86 @@
+name: Build & Publish PDFForge Releases
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust & MinGW target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Setup MinGW windres/gcc
+        run: |
+          if (!(Get-Command x86_64-w64-mingw32-gcc -ErrorAction SilentlyContinue)) {
+            choco install mingw -y --no-progress
+          }
+      - name: Build Windows x64 Release
+        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: Prepare Windows Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $exe = "target\x86_64-pc-windows-gnu\release\PDFForge-Rust.exe"
+          Copy-Item $exe "dist\PDFForge-Setup-1.0.0-Windows-x64.exe" -Force
+          New-Item -ItemType Directory -Force dist\portable | Out-Null
+          Copy-Item $exe "dist\portable\PDFForge.exe" -Force
+          Copy-Item "src-rust\icon.ico" "dist\portable\PDFForge.ico" -Force
+          Copy-Item "src-rust\WebView2Loader.dll" "dist\portable\WebView2Loader.dll" -Force
+          (Get-Item "dist\portable\WebView2Loader.dll").LastWriteTime = Get-Date
+          Push-Location dist
+          tar -a -c -f "PDFForge-1.0.0-Windows-x64-Portable.zip" "portable"
+          Pop-Location
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            dist/PDFForge-Setup-1.0.0-Windows-x64.exe
+            dist/PDFForge-1.0.0-Windows-x64-Portable.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Native macOS Binary
+        run: cargo build --release
+      - name: Bundle PDFForge.app Installer ZIP
+        run: |
+          mkdir -p dist/macos
+          cp -R release/macos/* dist/macos/
+          cp target/release/PDFForge-Rust dist/macos/PDFForge.app/Contents/MacOS/PDFForge-bin
+          chmod +x dist/macos/PDFForge.app/Contents/MacOS/PDFForge-bin
+          chmod +x dist/macos/PDFForge.app/Contents/MacOS/PDFForge
+          chmod +x dist/macos/Install-PDFForge-macOS.command
+          cd dist
+          zip -r -y "PDFForge-1.0.0-macOS-Installer.zip" macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: dist/PDFForge-1.0.0-macOS-Installer.zip
+
+  publish-release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+      - name: Create GitHub Release
+        uses: softprops/action-github-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-files/windows-artifacts/*
+            release-files/macos-artifacts/*
+

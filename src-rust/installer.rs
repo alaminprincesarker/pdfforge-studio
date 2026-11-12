@@ -346,10 +346,104 @@ pub fn apply_update_package(package_path: &str) -> Result<(), String> {
     }
 }
 
+fn fetch_single_manifest_url(url: &str) -> Result<(String, String, String, String), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let ps = format!(
+            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
+             $r = Invoke-RestMethod -Uri '{url}' -Headers @{{'User-Agent'='PDFForge-Updater'}} -TimeoutSec 6; \
+             $ver = if ($r.version) {{ $r.version }} elseif ($r.tag_name) {{ $r.tag_name }} else {{ '' }}; \
+             $dl = if ($r.downloadUrl) {{ [string]$r.downloadUrl }} else {{ '' }}; \
+             if (-not $dl -and $r.assets) {{ \
+               $exeAsset = $r.assets | Where-Object {{ $_.name -match '(?i)\\.exe$' -and $_.name -notmatch '(?i)^uninstall' }} | Select-Object -First 1; \
+               if ($exeAsset) {{ $dl = [string]$exeAsset.browser_download_url }} \
+             }}; \
+             $rel = if ($r.releasePageUrl) {{ [string]$r.releasePageUrl }} elseif ($r.html_url) {{ [string]$r.html_url }} else {{ '' }}; \
+             if (-not $rel) {{ $rel = $dl }}; \
+             $notes = if ($r.notes) {{ $r.notes }} elseif ($r.body) {{ $r.body }} else {{ '' }}; \
+             @{{ version=[string]$ver; downloadUrl=[string]$dl; releaseUrl=[string]$rel; notes=[string]$notes }} | ConvertTo-Json -Compress",
+            url = url.replace('\'', "''")
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Failed to invoke update check: {}", e))?;
+
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if err.is_empty() {
+                "Unable to reach update server".to_string()
+            } else {
+                err
+            });
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let parsed = serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|_| "Unrecognized response from update server".to_string())?;
+        let latest = parsed["version"].as_str().unwrap_or("").trim().trim_start_matches('v').to_string();
+        let dl_url = parsed["downloadUrl"].as_str().unwrap_or("").trim().to_string();
+        let rel_url = parsed["releaseUrl"].as_str().unwrap_or("").trim().to_string();
+        let notes = parsed["notes"].as_str().unwrap_or("").trim().to_string();
+        return Ok((latest, dl_url, rel_url, notes));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = url;
+        Err("Remote manifest fetch requires Windows PowerShell helper in this build.".to_string())
+    }
+}
+
+pub fn download_and_apply_update(download_url: &str) -> Result<(), String> {
+    let trimmed = download_url.trim();
+    let allowed = trimmed.starts_with("https://github.com/alaminprincesarker/pdfforge-studio/")
+        || trimmed.starts_with("https://raw.githubusercontent.com/alaminprincesarker/pdfforge-studio/")
+        || trimmed.starts_with("https://objects.githubusercontent.com/")
+        || trimmed.starts_with("https://alaminprincesarker.github.io/pdfforge-studio/");
+    if !allowed {
+        return Err("Auto-update download URL must originate from the official GitHub repository.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let dl_path = std::env::temp_dir().join(format!("PDFForge-DL-{}.exe", std::process::id()));
+        let ps = format!(
+            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
+             Invoke-WebRequest -Uri '{url}' -OutFile '{out}' -Headers @{{'User-Agent'='PDFForge-Updater'}} -MaximumRedirection 10 -UseBasicParsing -TimeoutSec 90",
+            url = trimmed.replace('\'', "''"),
+            out = dl_path.to_string_lossy().replace('\'', "''")
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Failed to launch downloader: {}", e))?;
+        if !out.status.success() {
+            let _ = fs::remove_file(&dl_path);
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if err.is_empty() {
+                "Failed to download update package from GitHub.".to_string()
+            } else {
+                format!("Download failed: {}", err)
+            });
+        }
+        let apply_res = apply_update_package(&dl_path.to_string_lossy());
+        let _ = fs::remove_file(&dl_path);
+        return apply_res;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Automatic in-app .exe update is only supported on Windows.".to_string())
+    }
+}
+
 pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
     let current_version = env!("CARGO_PKG_VERSION");
     let trimmed = manifest_url.trim();
-    if trimmed.is_empty() {
+    if trimmed.eq_ignore_ascii_case("local") || trimmed.eq_ignore_ascii_case("offline") {
         let local = scan_local_update_packages();
         return serde_json::json!({
             "ok": true,
@@ -359,6 +453,7 @@ pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
             "hasUpdate": local["found"].as_bool().unwrap_or(false),
             "localFilePath": local["filePath"].as_str().unwrap_or(""),
             "localFileName": local["fileName"].as_str().unwrap_or(""),
+            "downloadUrl": "",
             "releaseUrl": "",
             "notes": if local["found"].as_bool().unwrap_or(false) {
                 format!("Found newer local package: {}", local["fileName"].as_str().unwrap_or(""))
@@ -368,6 +463,60 @@ pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
             "error": ""
         });
     }
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") || trimmed.eq_ignore_ascii_case("github") {
+        let candidates = [
+            "https://api.github.com/repos/alaminprincesarker/pdfforge-studio/releases/latest",
+            "https://alaminprincesarker.github.io/pdfforge-studio/update.json",
+            "https://raw.githubusercontent.com/alaminprincesarker/pdfforge-studio/main/docs/update.json",
+        ];
+        let mut last_err = String::new();
+        for cand in candidates {
+            match fetch_single_manifest_url(cand) {
+                Ok((latest, dl_url, rel_url, notes)) if !latest.is_empty() => {
+                    let has_update = is_newer_semver(&latest, current_version);
+                    return serde_json::json!({
+                        "ok": true,
+                        "mode": "github",
+                        "currentVersion": current_version,
+                        "latestVersion": latest,
+                        "hasUpdate": has_update,
+                        "downloadUrl": dl_url,
+                        "releaseUrl": rel_url,
+                        "notes": notes,
+                        "error": ""
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => last_err = e,
+            }
+        }
+        // Offline fallback check
+        let local = scan_local_update_packages();
+        if local["found"].as_bool().unwrap_or(false) {
+            return serde_json::json!({
+                "ok": true,
+                "mode": "local",
+                "currentVersion": current_version,
+                "latestVersion": local["latestVersion"].as_str().unwrap_or(current_version),
+                "hasUpdate": true,
+                "localFilePath": local["filePath"].as_str().unwrap_or(""),
+                "localFileName": local["fileName"].as_str().unwrap_or(""),
+                "downloadUrl": "",
+                "releaseUrl": "",
+                "notes": format!("Found newer local package: {}", local["fileName"].as_str().unwrap_or("")),
+                "error": ""
+            });
+        }
+        return serde_json::json!({
+            "ok": false,
+            "mode": "github",
+            "currentVersion": current_version,
+            "hasUpdate": false,
+            "error": if last_err.is_empty() { "Unable to reach GitHub right now (offline or unavailable).".to_string() } else { last_err }
+        });
+    }
+
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
         return serde_json::json!({
             "ok": false,
@@ -377,76 +526,27 @@ pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
         });
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let ps = format!(
-            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-             $r = Invoke-RestMethod -Uri '{url}' -Headers @{{'User-Agent'='PDFForge-Updater'}} -TimeoutSec 6; \
-             $ver = if ($r.version) {{ $r.version }} elseif ($r.tag_name) {{ $r.tag_name }} else {{ '' }}; \
-             $dl = if ($r.downloadUrl) {{ $r.downloadUrl }} elseif ($r.html_url) {{ $r.html_url }} else {{ '' }}; \
-             $notes = if ($r.notes) {{ $r.notes }} elseif ($r.body) {{ $r.body }} else {{ '' }}; \
-             @{{ version=[string]$ver; releaseUrl=[string]$dl; notes=[string]$notes }} | ConvertTo-Json -Compress",
-            url = trimmed.replace('\'', "''")
-        );
-        match Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let latest = parsed["version"].as_str().unwrap_or("").trim().trim_start_matches('v').to_string();
-                    let rel_url = parsed["releaseUrl"].as_str().unwrap_or("").to_string();
-                    let notes = parsed["notes"].as_str().unwrap_or("").to_string();
-                    let has_update = !latest.is_empty() && is_newer_semver(&latest, current_version);
-                    return serde_json::json!({
-                        "ok": true,
-                        "mode": "remote",
-                        "currentVersion": current_version,
-                        "latestVersion": if latest.is_empty() { current_version.to_string() } else { latest },
-                        "hasUpdate": has_update,
-                        "releaseUrl": rel_url,
-                        "notes": notes,
-                        "error": ""
-                    });
-                }
-                return serde_json::json!({
-                    "ok": false,
-                    "currentVersion": current_version,
-                    "hasUpdate": false,
-                    "error": "Release endpoint returned non-JSON or unrecognized response."
-                });
-            }
-            Ok(out) => {
-                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                return serde_json::json!({
-                    "ok": false,
-                    "currentVersion": current_version,
-                    "hasUpdate": false,
-                    "error": if err.is_empty() { "Failed to reach update URL (device offline or endpoint unreachable).".to_string() } else { err }
-                });
-            }
-            Err(e) => {
-                return serde_json::json!({
-                    "ok": false,
-                    "currentVersion": current_version,
-                    "hasUpdate": false,
-                    "error": format!("Failed to invoke update check: {}", e)
-                });
-            }
+    match fetch_single_manifest_url(trimmed) {
+        Ok((latest, dl_url, rel_url, notes)) => {
+            let has_update = !latest.is_empty() && is_newer_semver(&latest, current_version);
+            serde_json::json!({
+                "ok": true,
+                "mode": "remote",
+                "currentVersion": current_version,
+                "latestVersion": if latest.is_empty() { current_version.to_string() } else { latest },
+                "hasUpdate": has_update,
+                "downloadUrl": dl_url,
+                "releaseUrl": rel_url,
+                "notes": notes,
+                "error": ""
+            })
         }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        serde_json::json!({
+        Err(e) => serde_json::json!({
             "ok": false,
             "currentVersion": current_version,
             "hasUpdate": false,
-            "error": "Online manifest check is only enabled on Windows builds."
-        })
+            "error": e
+        }),
     }
 }
 

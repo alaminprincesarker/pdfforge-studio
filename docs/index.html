@@ -686,7 +686,7 @@
           page organization, print studio, and distraction-free presentation mode — completely offline with zero telemetry.
         </p>
         <div class="hero-cta">
-          <a id="hero-win-setup" href="https://github.com/alaminprincesarker/pdfforge-studio/releases/latest/download/PDFForge-Setup-1.0.0-Windows-x64.exe" class="btn btn-primary">
+          <a id="hero-win-setup" href="https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.0-Windows-x64.exe" class="btn btn-primary">
             &#x2B07; Download Windows x64 (.exe)
           </a>
           <a id="hero-releases" href="https://github.com/alaminprincesarker/pdfforge-studio/releases" target="_blank" rel="noopener" class="btn btn-ghost">
@@ -811,7 +811,7 @@
       <div class="sec-head">
         <div class="sec-kicker">Releases &amp; Downloads</div>
         <h2 class="sec-title">Download PDFForge Studio v1.0.0</h2>
-        <p class="sec-sub">Choose your preferred package below. Release artifacts are served cleanly from GitHub Releases (or local <code>release/</code> folder when previewing offline).</p>
+        <p class="sec-sub">Choose your platform below. Installers are hosted directly on GitHub for immediate online download (automatically upgraded to tagged GitHub Release assets when available).</p>
       </div>
 
       <div class="grid-3">
@@ -823,7 +823,7 @@
           </div>
           <div style="display:grid;gap:10px;">
             <div class="dl-file">PDFForge-Setup-1.0.0-Windows-x64.exe (~6.4 MB)</div>
-            <a id="dl-win-setup" href="https://github.com/alaminprincesarker/pdfforge-studio/releases/latest/download/PDFForge-Setup-1.0.0-Windows-x64.exe" class="btn btn-primary">Download Windows Setup</a>
+            <a id="dl-win-setup" href="https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.0-Windows-x64.exe" class="btn btn-primary">Download Windows Setup</a>
           </div>
         </div>
 
@@ -835,7 +835,7 @@
           </div>
           <div style="display:grid;gap:10px;">
             <div class="dl-file">PDFForge-1.0.0-Windows-x64-Portable.zip (~3.1 MB)</div>
-            <a id="dl-win-portable" href="https://github.com/alaminprincesarker/pdfforge-studio/releases/latest/download/PDFForge-1.0.0-Windows-x64-Portable.zip" class="btn btn-ghost">Download Portable ZIP</a>
+            <a id="dl-win-portable" href="https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-1.0.0-Windows-x64-Portable.zip" class="btn btn-ghost">Download Portable ZIP</a>
           </div>
         </div>
 
@@ -843,11 +843,11 @@
           <div>
             <span class="dl-badge" style="background:rgba(168,85,247,0.14);color:#d8b4fe;border-color:rgba(168,85,247,0.3);">macOS 11+ • App Bundle</span>
             <h3>macOS App &amp; Script ZIP</h3>
-            <p>Contains <code>PDFForge.app</code> (<code>com.alamin.pdfforge.studio</code>), custom <code>.icns</code> document/app icons, and <code>Install-PDFForge-macOS.command</code>.</p>
+            <p>Includes <code>PDFForge.app</code>, <code>.icns</code> icons, and <code>Install-PDFForge-macOS.command</code> (builds native Apple Silicon/Intel app with Cargo or installs bundle to <code>/Applications</code>).</p>
           </div>
           <div style="display:grid;gap:10px;">
             <div class="dl-file">PDFForge-1.0.0-macOS-Installer.zip (~29 KB scaffold)</div>
-            <a id="dl-macos" href="https://github.com/alaminprincesarker/pdfforge-studio/releases/latest/download/PDFForge-1.0.0-macOS-Installer.zip" class="btn btn-ghost">Download macOS Package</a>
+            <a id="dl-macos" href="https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-1.0.0-macOS-Installer.zip" class="btn btn-ghost">Download macOS Package</a>
           </div>
         </div>
       </div>
@@ -856,7 +856,7 @@
         <div>
           <strong>Internal App Updater Manifest URL:</strong>
           <code id="update-manifest-url" style="margin-left:6px;color:#93c5fd;">https://alaminprincesarker.github.io/pdfforge-studio/update.json</code>
-          <div style="font-size:12px;color:var(--muted);margin-top:4px;">Paste this URL into <strong>Help &rarr; Check for Updates...</strong> inside PDFForge once your GitHub Pages site is live.</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">PDFForge Studio automatically checks GitHub on startup and notifies you when a new release arrives — or open <strong>Help &rarr; Check for Updates...</strong> manually.</div>
         </div>
         <button type="button" class="btn btn-ghost btn-sm" onclick="copyText(document.getElementById('update-manifest-url').textContent, 'Update manifest URL copied')">Copy Update URL</button>
       </div>
@@ -1014,16 +1014,12 @@ cargo build --release</pre>
         const parts = window.location.pathname.split("/").filter(Boolean);
         if (parts.length > 0 && parts[0] !== "docs" && parts[0] !== "index.html") {
           repo = parts[0];
-        } else {
-          repo = host;
         }
       }
 
       if (owner && repo) {
         const repoUrl = `https://github.com/${owner}/${repo}`;
-        const releaseBase = SITE_CONFIG.releaseTag === "latest"
-          ? `${repoUrl}/releases/latest/download`
-          : `${repoUrl}/releases/download/${SITE_CONFIG.releaseTag}`;
+        const rawBase = `https://github.com/${owner}/${repo}/raw/main/release`;
 
         const setHref = (id, url) => {
           const el = document.getElementById(id);
@@ -1033,11 +1029,11 @@ cargo build --release</pre>
         setHref("nav-github", repoUrl);
         setHref("hero-source", repoUrl);
         setHref("footer-github", repoUrl);
-        setHref("hero-releases", `${repoUrl}/releases`);
-        setHref("hero-win-setup", `${releaseBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
-        setHref("dl-win-setup", `${releaseBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
-        setHref("dl-win-portable", `${releaseBase}/PDFForge-1.0.0-Windows-x64-Portable.zip`);
-        setHref("dl-macos", `${releaseBase}/PDFForge-1.0.0-macOS-Installer.zip`);
+        setHref("hero-releases", `${repoUrl}/tree/main/release`);
+        setHref("hero-win-setup", `${rawBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
+        setHref("dl-win-setup", `${rawBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
+        setHref("dl-win-portable", `${rawBase}/PDFForge-1.0.0-Windows-x64-Portable.zip`);
+        setHref("dl-macos", `${rawBase}/PDFForge-1.0.0-macOS-Installer.zip`);
         setHref("doc-rust", `${repoUrl}/blob/main/src-rust/main.rs`);
         setHref("doc-req", `${repoUrl}/blob/main/REQUIREMENTS.md`);
         setHref("footer-license", `${repoUrl}/blob/main/LICENSE`);
@@ -1048,9 +1044,27 @@ cargo build --release</pre>
         }
 
         const manifestEl = document.getElementById("update-manifest-url");
-        if (manifestEl) {
+        if (manifestEl && window.location.protocol.startsWith("http") && host.endsWith(".github.io")) {
           manifestEl.textContent = `${window.location.origin}${window.location.pathname.replace(/index\.html$/, "")}update.json`;
         }
+
+        // If a formal GitHub Release exists, automatically switch download buttons to its tag assets
+        fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`)
+          .then(r => r.ok ? r.json() : null)
+          .then(rel => {
+            if (!rel || !Array.isArray(rel.assets) || rel.assets.length === 0) return;
+            const winExe = rel.assets.find(a => /setup.*.exe$/i.test(a.name)) || rel.assets.find(a => /.exe$/i.test(a.name) && !/^uninstall/i.test(a.name));
+            const winZip = rel.assets.find(a => /portable.*.zip$/i.test(a.name));
+            const macZip = rel.assets.find(a => /macos.*.zip$/i.test(a.name));
+            if (winExe) {
+              setHref("hero-win-setup", winExe.browser_download_url);
+              setHref("dl-win-setup", winExe.browser_download_url);
+            }
+            if (winZip) setHref("dl-win-portable", winZip.browser_download_url);
+            if (macZip) setHref("dl-macos", macZip.browser_download_url);
+            if (rel.html_url) setHref("hero-releases", rel.html_url);
+          })
+          .catch(() => {});
       }
     }
 

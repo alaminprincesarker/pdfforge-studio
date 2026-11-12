@@ -20,6 +20,10 @@ pub struct RecentFile {
     pub is_favorite: Option<bool>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -27,6 +31,8 @@ pub struct AppSettings {
     pub theme: String,
     pub remember_last_page: bool,
     pub enable_autosave: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -36,6 +42,7 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             remember_last_page: true,
             enable_autosave: true,
+            auto_check_updates: true,
         }
     }
 }
@@ -47,6 +54,7 @@ pub struct PartialAppSettings {
     pub theme: Option<String>,
     pub remember_last_page: Option<bool>,
     pub enable_autosave: Option<bool>,
+    pub auto_check_updates: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +133,9 @@ impl AppDataStore {
         }
         if let Some(auto) = partial.enable_autosave {
             current.enable_autosave = auto;
+        }
+        if let Some(auto_upd) = partial.auto_check_updates {
+            current.auto_check_updates = auto_upd;
         }
         if let Ok(json) = serde_json::to_string_pretty(&current) {
             let _ = fs::write(&self.settings_file, json);

@@ -459,6 +459,9 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     checkForUpdates: async function (manifestUrl) {
       return await apiPostJson('/app/checkForUpdates', { manifestUrl: manifestUrl || '' });
     },
+    downloadAndApplyUpdate: async function (downloadUrl) {
+      return await apiPostJson('/app/downloadAndApplyUpdate', { downloadUrl: downloadUrl || '' });
+    },
     repairInstallation: async function () {
       return await apiPostJson('/app/repairInstallation', {});
     },
@@ -815,6 +818,28 @@ fn handle_api_request(
             thread::spawn(move || {
                 let res = installer::check_release_manifest(&manifest_url);
                 responder.respond(json_response(StatusCode::OK, &res));
+            });
+        }
+        "/__rust_api__/app/downloadAndApplyUpdate" => {
+            let download_url = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("downloadUrl").and_then(|u| u.as_str()).map(|s| s.to_string()))
+                .unwrap_or_default();
+            thread::spawn(move || match installer::download_and_apply_update(&download_url) {
+                Ok(()) => {
+                    responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({ "ok": true, "updating": true }),
+                    ));
+                    thread::sleep(std::time::Duration::from_millis(450));
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({ "ok": false, "error": e }),
+                    ));
+                }
             });
         }
         "/__rust_api__/app/repairInstallation" => {

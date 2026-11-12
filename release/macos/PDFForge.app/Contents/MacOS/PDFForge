@@ -1,0 +1,10 @@
+#!/bin/bash
+# PDFForge Native Rust Launcher / Builder for macOS (Apple Silicon & Intel)
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$DIR/PDFForge-bin"
+if [ -x "$BIN" ]; then
+    exec "$BIN" "$@"
+else
+    osascript -e 'display dialog "PDFForge macOS Binary needs to be compiled once on macOS using Cargo. Run Install-PDFForge-macOS.command to build and install to /Applications." buttons {"OK"} default button "OK" with title "PDFForge 1.0.0"'
+fi
+

@@ -5,6 +5,7 @@
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases/latest",
-  "notes": "Initial Native Rust Edition release (tao + wry WebView2, offline PDF.js + pdf-lib, Page Organizer, Print Studio, Full Screen Presentation HUD, Edit Page Text/Images, and Clean Uninstaller)."
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.0.0-Windows-x64.exe",
+  "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
+  "notes": "Native Rust Edition release with Pinch Zoom, Highlights & Shapes, Live Edit Page, Page Organizer, Print Studio, Full Screen HUD, and Automatic GitHub Updater."
 }

@@ -3,13 +3,16 @@
 **/*.rs.bk
 *.pdb
 
-# Release binary installers & ZIP archives (upload these to GitHub Releases instead of git history)
+# Release binary executables & temporary unpackaged copies (only track the 3 distributable deliverables below)
 /release/*.exe
 /release/*.dll
 /release/*.ico
 /release/*.zip
 /release/PDFForge-1.0.0-Windows-x64-Portable/
-/release/macos/*.app/Contents/MacOS/PDFForge
+/release/macos/*.app/Contents/MacOS/PDFForge-bin
+!/release/PDFForge-Setup-1.0.0-Windows-x64.exe
+!/release/PDFForge-1.0.0-Windows-x64-Portable.zip
+!/release/PDFForge-1.0.0-macOS-Installer.zip
 
 # OS, Editor & Temporary files
 *.log
