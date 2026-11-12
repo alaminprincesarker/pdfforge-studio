@@ -1,0 +1,23 @@
+# Rust build outputs (large ~1.4 GB generated binaries/intermediates)
+/target/
+**/*.rs.bk
+*.pdb
+
+# Release binary installers & ZIP archives (upload these to GitHub Releases instead of git history)
+/release/*.exe
+/release/*.dll
+/release/*.ico
+/release/*.zip
+/release/PDFForge-1.0.0-Windows-x64-Portable/
+/release/macos/*.app/Contents/MacOS/PDFForge
+
+# OS, Editor & Temporary files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+

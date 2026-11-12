@@ -1,0 +1,29 @@
+[package]
+name = "pdfforge"
+version = "1.0.0"
+edition = "2021"
+description = "PDFForge - 100% Offline Desktop PDF Reader & Editor (Rust Native Edition)"
+authors = ["Md. Alamin <alaminprincesarker@gmail.com>"]
+license = "MIT"
+
+[[bin]]
+name = "PDFForge-Rust"
+path = "src-rust/main.rs"
+
+[dependencies]
+tao = "0.30"
+wry = "0.47"
+rfd = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+rust-embed = "8.5"
+mime_guess = "2.0"
+http = "1.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
+

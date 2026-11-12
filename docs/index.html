@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDFForge Studio — Open Source Offline Rust PDF Reader &amp; Editor</title>
+  <meta name="description" content="PDFForge Studio is a 100% offline, open-source native Rust PDF reader and editor by Md. Alamin. Fast startup, pinch zoom, highlights, page editing, presentation mode, and local privacy." />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0%25' stop-color='%232563eb'/%3E%3Cstop offset='100%25' stop-color='%236366f1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='50%25' y='55%25' dominant-baseline='middle' text-anchor='middle' fill='white' font-family='Segoe UI,Arial,sans-serif' font-weight='800' font-size='28'%3EPF%3C/text%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #0f1015;
+      --bg-soft: #161821;
+      --card: #1c1f2b;
+      --card-border: #2c3144;
+      --text: #eef1f8;
+      --muted: #9aa3b8;
+      --accent: #3b82f6;
+      --accent-2: #6366f1;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      --radius: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      background:
+        radial-gradient(900px 460px at 15% -5%, rgba(59, 130, 246, 0.16), transparent 60%),
+        radial-gradient(800px 420px at 85% 5%, rgba(99, 102, 241, 0.14), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    p code, h3 code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 1px 5px;
+      border-radius: 5px;
+      color: #dbeafe;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1140px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Header */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: rgba(15, 16, 21, 0.84);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .nav-wrap {
+      height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.2px;
+    }
+
+    .brand-logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 13px;
+      box-shadow: 0 6px 18px rgba(59, 130, 246, 0.35);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .nav-links a:hover {
+      color: #fff;
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: transform 0.14s ease, background 0.16s ease, border-color 0.16s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      box-shadow: 0 10px 26px rgba(59, 130, 246, 0.3);
+    }
+
+    .btn-primary:hover {
+      filter: brightness(1.08);
+    }
+
+    .btn-ghost {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: var(--card-border);
+      color: var(--text);
+    }
+
+    .btn-ghost:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: #46506e;
+    }
+
+    .btn-sm {
+      padding: 7px 12px;
+      font-size: 13px;
+      border-radius: 8px;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 68px 0 54px;
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 42px;
+      align-items: center;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--muted);
+    }
+
+    .pill-green {
+      background: rgba(16, 185, 129, 0.12);
+      border-color: rgba(16, 185, 129, 0.32);
+      color: #6ee7b7;
+    }
+
+    .pill-blue {
+      background: rgba(59, 130, 246, 0.14);
+      border-color: rgba(59, 130, 246, 0.34);
+      color: #93c5fd;
+    }
+
+    .hero h1 {
+      font-size: clamp(32px, 4.4vw, 48px);
+      line-height: 1.14;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+
+    .gradient-text {
+      background: linear-gradient(90deg, #60a5fa, #a5b4fc, #34d399);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .hero p {
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 580px;
+      margin-bottom: 24px;
+    }
+
+    .hero-cta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .hero-meta {
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    /* App Window Mockup */
+    .mockup {
+      background: #171923;
+      border: 1px solid #30364c;
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .mockup-bar {
+      background: #12141c;
+      border-bottom: 1px solid #282d3f;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #aeb7cc;
+    }
+
+    .mockup-toolbar {
+      background: #1d202d;
+      border-bottom: 1px solid #2c3144;
+      padding: 7px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tool-chip {
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      background: #272b3b;
+      color: #d6dceb;
+      border: 1px solid #363c52;
+    }
+
+    .tool-chip.active {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #fff;
+    }
+
+    .mockup-body {
+      display: grid;
+      grid-template-columns: 64px 1fr 94px;
+      min-height: 230px;
+    }
+
+    .mockup-left {
+      background: #14161f;
+      border-right: 1px solid #262b3b;
+      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .thumb-box {
+      height: 54px;
+      border-radius: 4px;
+      background: #f8fafc;
+      border: 2px solid transparent;
+      padding: 5px;
+    }
+
+    .thumb-box.active {
+      border-color: #3b82f6;
+    }
+
+    .thumb-line {
+      height: 4px;
+      background: #cbd5e1;
+      border-radius: 2px;
+      margin-bottom: 4px;
+    }
+
+    .mockup-canvas {
+      background: #202330;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pdf-sheet {
+      width: 100%;
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 4px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      font-size: 11px;
+    }
+
+    .pdf-sheet h4 {
+      font-size: 12px;
+      margin-bottom: 6px;
+      color: #1e3a8a;
+    }
+
+    .pdf-highlight {
+      background: #fef08a;
+      padding: 1px 3px;
+      border-radius: 2px;
+    }
+
+    .pdf-shape {
+      margin-top: 8px;
+      padding: 6px 8px;
+      border: 1.5px solid #3b82f6;
+      background: rgba(59, 130, 246, 0.08);
+      border-radius: 4px;
+      font-size: 10px;
+      color: #1d4ed8;
+    }
+
+    .mockup-right {
+      background: #14161f;
+      border-left: 1px solid #262b3b;
+      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 10px;
+      color: #cbd5e1;
+    }
+
+    .panel-item {
+      background: #1f2331;
+      border: 1px solid #2f3549;
+      border-radius: 5px;
+      padding: 5px 6px;
+    }
+
+    /* Sections */
+    section {
+      padding: 56px 0;
+    }
+
+    .sec-head {
+      margin-bottom: 28px;
+    }
+
+    .sec-kicker {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #60a5fa;
+      margin-bottom: 6px;
+    }
+
+    .sec-title {
+      font-size: clamp(24px, 3vw, 32px);
+      font-weight: 800;
+      letter-spacing: -0.015em;
+      margin-bottom: 8px;
+    }
+
+    .sec-sub {
+      color: var(--muted);
+      max-width: 680px;
+      font-size: 15px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 22px;
+      transition: border-color 0.16s ease, transform 0.16s ease;
+    }
+
+    .card:hover {
+      border-color: #46506e;
+    }
+
+    .card-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.28);
+      color: #93c5fd;
+      display: grid;
+      place-items: center;
+      margin-bottom: 14px;
+      font-size: 18px;
+    }
+
+    .card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .card p {
+      font-size: 13.5px;
+      color: var(--muted);
+    }
+
+    /* Downloads */
+    .dl-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .dl-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(16, 185, 129, 0.14);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      margin-bottom: 10px;
+    }
+
+    .dl-file {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #cbd5e1;
+      background: #12141c;
+      border: 1px solid #2a2f42;
+      padding: 7px 10px;
+      border-radius: 8px;
+      word-break: break-all;
+    }
+
+    .notice-box {
+      margin-top: 20px;
+      background: rgba(59, 130, 246, 0.08);
+      border: 1px solid rgba(59, 130, 246, 0.28);
+      border-radius: 12px;
+      padding: 16px 18px;
+      font-size: 13.5px;
+      color: #cbd5e1;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    /* Code Blocks */
+    .code-box {
+      background: #11131b;
+      border: 1px solid #2b3042;
+      border-radius: 12px;
+      padding: 16px 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: #d6e0f5;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    .code-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 12px;
+    }
+
+    .stack-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .stack-pill {
+      padding: 6px 12px;
+      border-radius: 8px;
+      background: #141722;
+      border: 1px solid #2d3348;
+      font-size: 12.5px;
+      color: #dce3f3;
+    }
+
+    /* About & Developer */
+    .kv-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .kv-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 13.5px;
+    }
+
+    .kv-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .kv-label {
+      color: var(--muted);
+    }
+
+    .kv-val {
+      font-weight: 600;
+      text-align: right;
+    }
+
+    .link-accent {
+      color: #60a5fa;
+    }
+
+    .link-accent:hover {
+      text-decoration: underline;
+    }
+
+    footer {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 28px 0 40px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .footer-flex {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      background: #1e293b;
+      color: #f8fafc;
+      border: 1px solid #3b82f6;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: all 0.18s ease;
+      z-index: 90;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 960px) {
+      .hero {
+        grid-template-columns: 1fr;
+        padding-top: 42px;
+      }
+      .grid-3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 680px) {
+      .nav-links {
+        display: none;
+      }
+      .grid-3, .grid-2 {
+        grid-template-columns: 1fr;
+      }
+      .mockup-body {
+        grid-template-columns: 1fr;
+      }
+      .mockup-left, .mockup-right {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container nav-wrap">
+      <a href="#top" class="brand">
+        <span class="brand-logo">PF</span>
+        <span>PDFForge Studio</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#download">Download</a>
+        <a href="#opensource">Build &amp; Stack</a>
+        <a href="#about">About Developer</a>
+      </nav>
+      <div class="nav-actions">
+        <a id="nav-github" href="https://github.com" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">GitHub Repo</a>
+        <a href="#download" class="btn btn-primary btn-sm">Download v1.0.0</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top" class="container">
+    <!-- Hero -->
+    <section class="hero">
+      <div>
+        <div class="pill-row">
+          <span class="pill pill-green">&#x2713; 100% Offline &amp; Private</span>
+          <span class="pill pill-blue">Native Rust (tao + wry WebView2)</span>
+          <span class="pill">Open Source • MIT License</span>
+        </div>
+        <h1>Read, Annotate &amp; Edit PDFs <span class="gradient-text">at Native Rust Speed.</span></h1>
+        <p>
+          <strong>PDFForge Studio</strong> is a lightweight (~6.4 MB), privacy-first desktop PDF reader and editor
+          built in pure Rust. Enjoy smooth touchpad pinch zoom, highlighter &amp; shapes, live page text/image editing,
+          page organization, print studio, and distraction-free presentation mode — completely offline with zero telemetry.
+        </p>
+        <div class="hero-cta">
+          <a id="hero-win-setup" href="#download" class="btn btn-primary">
+            &#x2B07; Download Windows x64 (.exe)
+          </a>
+          <a id="hero-releases" href="#download" class="btn btn-ghost">
+            All Platforms &amp; Portable
+          </a>
+          <a id="hero-source" href="https://github.com" target="_blank" rel="noopener" class="btn btn-ghost">
+            View Source Code
+          </a>
+        </div>
+        <div class="hero-meta">
+          <span>Version <strong>1.0.0</strong></span>
+          <span>Windows 10/11 (x64) &amp; macOS</span>
+          <span>Author: <strong>Md. Alamin</strong></span>
+        </div>
+      </div>
+
+      <div class="mockup" aria-label="PDFForge Studio Interface Preview">
+        <div class="mockup-bar">
+          <span><strong>PF</strong> sample.pdf — PDFForge Studio</span>
+          <span>Fullscreen: Ctrl+L</span>
+        </div>
+        <div class="mockup-toolbar">
+          <span class="tool-chip active">Select</span>
+          <span class="tool-chip">Hand</span>
+          <span class="tool-chip">125%</span>
+          <span class="tool-chip">Highlight</span>
+          <span class="tool-chip">Shapes</span>
+          <span class="tool-chip">Text</span>
+          <span class="tool-chip">Export</span>
+        </div>
+        <div class="mockup-body">
+          <div class="mockup-left">
+            <div class="thumb-box active">
+              <div class="thumb-line" style="width:85%;background:#2563eb;"></div>
+              <div class="thumb-line" style="width:65%;"></div>
+              <div class="thumb-line" style="width:90%;"></div>
+              <div class="thumb-line" style="width:55%;"></div>
+            </div>
+            <div class="thumb-box">
+              <div class="thumb-line" style="width:70%;"></div>
+              <div class="thumb-line" style="width:90%;"></div>
+              <div class="thumb-line" style="width:60%;"></div>
+            </div>
+          </div>
+          <div class="mockup-canvas">
+            <div class="pdf-sheet">
+              <h4>PDFForge Native Document</h4>
+              <div>Fast local rendering powered by <span class="pdf-highlight">PDF.js Web Worker + pdf-lib</span> with crisp offline text selection.</div>
+              <div class="pdf-shape">&#x25A2; Highlighter Shapes • Freehand Ink • Live Edit Page</div>
+            </div>
+          </div>
+          <div class="mockup-right">
+            <strong style="color:#fff;">Edit Tools</strong>
+            <div class="panel-item">Edit Page Text</div>
+            <div class="panel-item">Replace Image</div>
+            <div class="panel-item">Sticky Note</div>
+            <div class="panel-item">Stamp &amp; Redact</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section id="features">
+      <div class="sec-head">
+        <div class="sec-kicker">Capabilities</div>
+        <h2 class="sec-title">Everything You Expect in a Modern Desktop PDF Suite</h2>
+        <p class="sec-sub">Engineered for speed, accuracy, and complete offline autonomy — without bloated cloud accounts or heavy runtime installers.</p>
+      </div>
+
+      <div class="grid-3">
+        <article class="card">
+          <div class="card-icon">&#x1F50D;</div>
+          <h3>Precision Pinch &amp; Marquee Zoom</h3>
+          <p>Smooth two-finger touchpad pinch zooming, Ctrl+Wheel, drag-box Marquee zoom, Fit Width/Page, and consistent zoom preserved across every page and Full Screen slide.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F58C;</div>
+          <h3>Text Selection &amp; Highlighter Tools</h3>
+          <p>Accurate <code>.textLayer</code> selection popup with instant Copy, Highlight, Underline, Strikethrough, plus freehand highlighter brush and translucent shape overlays.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x270E;</div>
+          <h3>Edit Page Content (Text &amp; Images)</h3>
+          <p>Dedicated Right Bar panel scans active page text runs and images so you can edit text blocks, restyle typography, replace images, place signatures, or redact.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F5A5;</div>
+          <h3>Presentation Full Screen (<code>Ctrl+L</code>)</h3>
+          <p>Auto-hiding 3-second top hint banner, bottom hover-reveal HUD bar, touchpad swipe &amp; keyboard slide navigation, plus full scroll restoration on exit.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F5C2;</div>
+          <h3>Responsive Page Organizer</h3>
+          <p>Drag-and-drop thumbnails or swap exact page numbers, rotate CW/CCW, duplicate, delete, or merge pages from other PDFs with cached previews.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F5A8;</div>
+          <h3>Acrobat-Style Print Studio &amp; Utilities</h3>
+          <p>Enumerates Windows printers with Copies, Grayscale, Save Ink, Poster/Multiple/Booklet layouts, plus Merge, Split, Watermark, Crop, Compress &amp; Encryption.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F504;</div>
+          <h3>In-App Updater &amp; Clean Uninstaller</h3>
+          <p>Built-in <strong>Help &rarr; Check for Updates...</strong> upgrades locally via <code>.exe</code> package or manifest URL, and the Win10/11 manifested uninstaller leaves zero residue.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x1F512;</div>
+          <h3>Strict Offline Privacy Guarantee</h3>
+          <p>All JS, CSS, cmaps, standard fonts, and workers load locally via <code>pdfforge://localhost/</code>. Recents, settings, and signatures remain in local <code>%APPDATA%</code>.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon">&#x26A1;</div>
+          <h3>Lightweight ~6.4 MB Native Binary</h3>
+          <p>Migrated from Electron (~150+ MB) to native Rust (<code>tao</code> + <code>wry</code> WebView2), eliminating <code>WebView2Loader.dll</code> static import dependency on Windows.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Download -->
+    <section id="download">
+      <div class="sec-head">
+        <div class="sec-kicker">Releases &amp; Downloads</div>
+        <h2 class="sec-title">Download PDFForge Studio v1.0.0</h2>
+        <p class="sec-sub">Choose your preferred package below. Release artifacts are served cleanly from GitHub Releases (or local <code>release/</code> folder when previewing offline).</p>
+      </div>
+
+      <div class="grid-3">
+        <div class="card dl-card">
+          <div>
+            <span class="dl-badge">Recommended • Windows 10/11 (x64)</span>
+            <h3>Windows Installer (.exe)</h3>
+            <p>Installs to <code>%LOCALAPPDATA%\Programs\PDFForge</code>, registers Control Panel &amp; <code>.pdf</code> file associations with custom PDF icons, and includes a clean uninstaller.</p>
+          </div>
+          <div style="display:grid;gap:10px;">
+            <div class="dl-file">PDFForge-Setup-1.0.0-Windows-x64.exe (~6.4 MB)</div>
+            <a id="dl-win-setup" href="../release/PDFForge-Setup-1.0.0-Windows-x64.exe" class="btn btn-primary">Download Windows Setup</a>
+          </div>
+        </div>
+
+        <div class="card dl-card">
+          <div>
+            <span class="dl-badge" style="background:rgba(59,130,246,0.14);color:#93c5fd;border-color:rgba(59,130,246,0.3);">No Install • Windows x64</span>
+            <h3>Windows Portable ZIP</h3>
+            <p>Zero-registry standalone bundle containing <code>PDFForge.exe</code>, <code>PDFForge.ico</code>, and <code>WebView2Loader.dll</code> — unzip anywhere or run from a USB drive.</p>
+          </div>
+          <div style="display:grid;gap:10px;">
+            <div class="dl-file">PDFForge-1.0.0-Windows-x64-Portable.zip (~3.1 MB)</div>
+            <a id="dl-win-portable" href="../release/PDFForge-1.0.0-Windows-x64-Portable.zip" class="btn btn-ghost">Download Portable ZIP</a>
+          </div>
+        </div>
+
+        <div class="card dl-card">
+          <div>
+            <span class="dl-badge" style="background:rgba(168,85,247,0.14);color:#d8b4fe;border-color:rgba(168,85,247,0.3);">macOS 11+ • App Bundle</span>
+            <h3>macOS App &amp; Script ZIP</h3>
+            <p>Contains <code>PDFForge.app</code> (<code>com.alamin.pdfforge.studio</code>), custom <code>.icns</code> document/app icons, and <code>Install-PDFForge-macOS.command</code>.</p>
+          </div>
+          <div style="display:grid;gap:10px;">
+            <div class="dl-file">PDFForge-1.0.0-macOS-Installer.zip (~29 KB scaffold)</div>
+            <a id="dl-macos" href="../release/PDFForge-1.0.0-macOS-Installer.zip" class="btn btn-ghost">Download macOS Package</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="notice-box">
+        <div>
+          <strong>Internal App Updater Manifest URL:</strong>
+          <code id="update-manifest-url" style="margin-left:6px;color:#93c5fd;">./update.json</code>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">Paste this URL into <strong>Help &rarr; Check for Updates...</strong> inside PDFForge once your GitHub Pages site is live.</div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="copyText(document.getElementById('update-manifest-url').textContent, 'Update manifest URL copied')">Copy Update URL</button>
+      </div>
+    </section>
+
+    <!-- Open Source & Build -->
+    <section id="opensource">
+      <div class="sec-head">
+        <div class="sec-kicker">Open Source Architecture</div>
+        <h2 class="sec-title">Built with Rust &amp; Open Web Standards (MIT License)</h2>
+        <p class="sec-sub">Inspect, customize, or build PDFForge Studio directly from source. Contributions, forks, and issue reports are welcome.</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>Build From Source (Windows / macOS)</h3>
+          <p style="margin-bottom:14px;">Requires Rust (<code>rustup</code> / <code>cargo</code>) and MinGW-w64 <code>windres</code>/<code>gcc</code> on Windows for PE icons &amp; manifest embedding.</p>
+          <div class="code-box">
+            <div class="code-header">
+              <span>Terminal / PowerShell</span>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="copyText(document.getElementById('clone-cmd').innerText, 'Build commands copied')">Copy</button>
+            </div>
+<pre id="clone-cmd">git clone https://github.com/&lt;USERNAME&gt;/&lt;REPO&gt;.git
+cd "&lt;REPO&gt;"
+cargo build --release</pre>
+          </div>
+          <div class="stack-list">
+            <span class="stack-pill">Rust 2021</span>
+            <span class="stack-pill">tao 0.30</span>
+            <span class="stack-pill">wry 0.47</span>
+            <span class="stack-pill">rfd 0.15</span>
+            <span class="stack-pill">rust-embed 8.5</span>
+            <span class="stack-pill">PDF.js Worker</span>
+            <span class="stack-pill">pdf-lib</span>
+            <span class="stack-pill">React 18 UI</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Project Documentation &amp; Key Files</h3>
+          <p style="margin-bottom:14px;">Clean section indexes and requirement maps make maintaining or extending features fast.</p>
+          <div class="kv-list">
+            <div class="kv-item">
+              <span class="kv-label">Source Code &amp; Native Backend</span>
+              <a id="doc-rust" href="../src-rust/main.rs" class="link-accent kv-val">src-rust/main.rs</a>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Master Requirements Tracker</span>
+              <a id="doc-req" href="../REQUIREMENTS.md" class="link-accent kv-val">REQUIREMENTS.md</a>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Architecture &amp; Symbol Map</span>
+              <a href="./ARCHITECTURE_AND_SECTIONS.md" class="link-accent kv-val">ARCHITECTURE_AND_SECTIONS.md</a>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Workflows &amp; Release Checklist</span>
+              <a href="./FEATURES_AND_WORKFLOWS.md" class="link-accent kv-val">FEATURES_AND_WORKFLOWS.md</a>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">GitHub Push &amp; Hosting Guide</span>
+              <a href="./GITHUB_PUSH_AND_PUBLISH_GUIDE.md" class="link-accent kv-val">GITHUB_PUSH_AND_PUBLISH_GUIDE.md</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- About & Publishing Info -->
+    <section id="about">
+      <div class="sec-head">
+        <div class="sec-kicker">About &amp; Publishing Metadata</div>
+        <h2 class="sec-title">Created &amp; Maintained by Md. Alamin</h2>
+        <p class="sec-sub">Full publisher metadata for open-source distribution, package registries, and direct support.</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>Developer &amp; Contact</h3>
+          <div class="kv-list">
+            <div class="kv-item">
+              <span class="kv-label">Author / Publisher</span>
+              <span class="kv-val">Md. Alamin (PDFForge Studio)</span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Contact Email</span>
+              <span class="kv-val">
+                <a href="mailto:alaminprincesarker@gmail.com?subject=PDFForge%20Studio%20Inquiry" class="link-accent">alaminprincesarker@gmail.com</a>
+                <button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;padding:4px 9px;" onclick="copyText('alaminprincesarker@gmail.com', 'Email copied')">Copy</button>
+              </span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">License</span>
+              <span class="kv-val">MIT Open Source License</span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Privacy Standard</span>
+              <span class="kv-val" style="color:#6ee7b7;">Zero Cloud • Zero Telemetry</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Application Package Details</h3>
+          <div class="kv-list">
+            <div class="kv-item">
+              <span class="kv-label">Application Name</span>
+              <span class="kv-val">PDFForge Studio</span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Package Identifier</span>
+              <span class="kv-val" style="font-family:monospace;">com.alamin.pdfforge.studio</span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Current Version</span>
+              <span class="kv-val">v1.0.0 (Pure Rust Native)</span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Distribution Channels</span>
+              <span class="kv-val">GitHub Releases • Portable ZIP • Store/Winget Ready</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-flex">
+      <div>&copy; 2026 <strong>Md. Alamin</strong> (PDFForge Studio) • MIT Open Source Software</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;">
+        <a href="mailto:alaminprincesarker@gmail.com">alaminprincesarker@gmail.com</a>
+        <a id="footer-github" href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+        <a id="footer-license" href="../LICENSE">MIT License</a>
+      </div>
+    </div>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    // Optional manual override if using a custom domain; leave empty for automatic GitHub Pages detection.
+    const SITE_CONFIG = {
+      githubOwner: "",
+      githubRepo: "",
+      releaseTag: "latest"
+    };
+
+    function detectGitHubInfo() {
+      let owner = SITE_CONFIG.githubOwner.trim();
+      let repo = SITE_CONFIG.githubRepo.trim();
+
+      const host = window.location.hostname.toLowerCase();
+      if (!owner && host.endsWith(".github.io")) {
+        owner = host.split(".")[0];
+        const parts = window.location.pathname.split("/").filter(Boolean);
+        if (parts.length > 0 && parts[0] !== "docs" && parts[0] !== "index.html") {
+          repo = parts[0];
+        } else {
+          repo = host;
+        }
+      }
+
+      if (owner && repo) {
+        const repoUrl = `https://github.com/${owner}/${repo}`;
+        const releaseBase = SITE_CONFIG.releaseTag === "latest"
+          ? `${repoUrl}/releases/latest/download`
+          : `${repoUrl}/releases/download/${SITE_CONFIG.releaseTag}`;
+
+        const setHref = (id, url) => {
+          const el = document.getElementById(id);
+          if (el) el.href = url;
+        };
+
+        setHref("nav-github", repoUrl);
+        setHref("hero-source", repoUrl);
+        setHref("footer-github", repoUrl);
+        setHref("hero-releases", `${repoUrl}/releases`);
+        setHref("hero-win-setup", `${releaseBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
+        setHref("dl-win-setup", `${releaseBase}/PDFForge-Setup-1.0.0-Windows-x64.exe`);
+        setHref("dl-win-portable", `${releaseBase}/PDFForge-1.0.0-Windows-x64-Portable.zip`);
+        setHref("dl-macos", `${releaseBase}/PDFForge-1.0.0-macOS-Installer.zip`);
+        setHref("doc-rust", `${repoUrl}/blob/main/src-rust/main.rs`);
+        setHref("doc-req", `${repoUrl}/blob/main/REQUIREMENTS.md`);
+        setHref("footer-license", `${repoUrl}/blob/main/LICENSE`);
+
+        const cloneEl = document.getElementById("clone-cmd");
+        if (cloneEl) {
+          cloneEl.textContent = `git clone ${repoUrl}.git\ncd "${repo}"\ncargo build --release`;
+        }
+
+        const manifestEl = document.getElementById("update-manifest-url");
+        if (manifestEl) {
+          manifestEl.textContent = `${window.location.origin}${window.location.pathname.replace(/index\.html$/, "")}update.json`;
+        }
+      }
+    }
+
+    let toastTimer = null;
+    function copyText(text, msg) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => showToast(msg || "Copied!")).catch(() => showToast(msg || "Copied!"));
+      } else {
+        showToast(msg || "Copy unavailable");
+      }
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById("toast");
+      if (!el) return;
+      el.textContent = msg;
+      el.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+    }
+
+    detectGitHubInfo();
+  </script>
+</body>
+</html>
+
