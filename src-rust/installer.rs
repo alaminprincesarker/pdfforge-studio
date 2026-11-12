@@ -369,7 +369,7 @@ pub fn apply_update_package(package_path: &str) -> Result<(), String> {
         let target_exe = get_default_install_dir().join("PDFForge.exe");
         let bat_path = std::env::temp_dir().join(format!("pdfforge_update_{}.cmd", std::process::id()));
         let bat_content = format!(
-            "@echo off\r\nping 127.0.0.1 -n 2 >nul\r\ntaskkill /f /im PDFForge.exe >nul 2>&1\r\nping 127.0.0.1 -n 2 >nul\r\n\"{staged}\" --install-silent\r\ndel /f /q \"{staged}\" >nul 2>&1\r\nif exist \"{target}\" start \"\" \"{target}\"\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
+            "@echo off\r\nping 127.0.0.1 -n 2 >nul\r\ntaskkill /f /im PDFForge.exe >nul 2>&1\r\ntaskkill /f /im PDFForge-Rust.exe >nul 2>&1\r\nping 127.0.0.1 -n 2 >nul\r\n\"{staged}\" --install-silent\r\ndel /f /q \"{staged}\" >nul 2>&1\r\nif exist \"{target}\" start \"\" \"{target}\"\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
             staged = staged.to_string_lossy(),
             target = target_exe.to_string_lossy()
         );
@@ -509,10 +509,22 @@ pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
     }
 
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") || trimmed.eq_ignore_ascii_case("github") {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let raw_url = format!(
+            "https://raw.githubusercontent.com/alaminprincesarker/pdfforge-studio/main/docs/update.json?t={}",
+            ts
+        );
+        let pages_url = format!(
+            "https://alaminprincesarker.github.io/pdfforge-studio/update.json?t={}",
+            ts
+        );
         let candidates = [
+            raw_url.as_str(),
+            pages_url.as_str(),
             "https://api.github.com/repos/alaminprincesarker/pdfforge-studio/releases/latest",
-            "https://alaminprincesarker.github.io/pdfforge-studio/update.json",
-            "https://raw.githubusercontent.com/alaminprincesarker/pdfforge-studio/main/docs/update.json",
         ];
         let mut last_err = String::new();
         for cand in candidates {

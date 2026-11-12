@@ -131,6 +131,24 @@ struct IpcWindowCommand {
     value: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectPrintPayload {
+    printer_name: String,
+    #[serde(default = "default_print_copies")]
+    copies: u16,
+    #[serde(default)]
+    orientation: String,
+    #[serde(default)]
+    paper_size: String,
+    output_pdf_path: Option<String>,
+    pages: Vec<String>,
+}
+
+fn default_print_copies() -> u16 {
+    1
+}
+
 fn guess_mime_type(path: &str) -> &'static str {
     let lower = path.to_lowercase();
     if lower.ends_with(".html") {
@@ -319,6 +337,9 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     listPrinters: async function () {
       return await apiPostJson('/print/listPrinters', {});
     },
+    printDirect: async function (opts) {
+      return await apiPostJson('/print/direct', opts || {});
+    },
     toggleFullScreen: async function () {
       const next = !window.__pdfforgeState.isFullScreen;
       window.__pdfforgeState.isFullScreen = next;
@@ -459,7 +480,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.0.1';
+      return '1.0.2';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -928,6 +949,38 @@ fn handle_api_request(
                 let printers = dialogs::list_printers();
                 responder.respond(json_response(StatusCode::OK, &printers));
             });
+        }
+        "/__rust_api__/print/direct" => {
+            let payload: Result<DirectPrintPayload, _> = serde_json::from_slice(&body);
+            match payload {
+                Ok(p) => {
+                    thread::spawn(move || {
+                        match dialogs::print_images_direct(
+                            &p.printer_name,
+                            p.copies,
+                            &p.orientation,
+                            &p.paper_size,
+                            p.output_pdf_path.as_deref(),
+                            &p.pages,
+                        ) {
+                            Ok(()) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true }),
+                            )),
+                            Err(err) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": err }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => {
+                    responder.respond(json_response(
+                        StatusCode::BAD_REQUEST,
+                        &json!({ "ok": false, "error": format!("Invalid print request: {}", e) }),
+                    ));
+                }
+            }
         }
         "/__rust_api__/app/ready" => {
             webview_ready.store(true, Ordering::SeqCst);
