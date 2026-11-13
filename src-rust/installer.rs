@@ -47,12 +47,46 @@ pub fn check_and_run_installer_mode() -> bool {
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
+    // 1. Staged update application: --apply-update-from <pid>
+    if let Some(pos) = args.iter().position(|a| a.eq_ignore_ascii_case("--apply-update-from")) {
+        if let Some(pid_str) = args.get(pos + 1) {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                crate::single_instance::wait_for_process_exit(pid, 6000);
+            }
+        }
+        let _ = perform_install(&exe_path, true);
+        return true;
+    }
+
+    // 2. Direct silent update invocation: --update-silent
     let is_update_silent = args.iter().any(|a| a.eq_ignore_ascii_case("--update-silent"));
     if is_update_silent {
         let _ = perform_install(&exe_path, true);
         return true;
     }
 
+    // 3. Detached uninstall worker in %TEMP%: --uninstall-worker <pid> <dir>
+    if let Some(pos) = args.iter().position(|a| a.eq_ignore_ascii_case("--uninstall-worker")) {
+        if let Some(pid_str) = args.get(pos + 1) {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                crate::single_instance::wait_for_process_exit(pid, 6000);
+            }
+        }
+        if let Some(target_dir_str) = args.get(pos + 2) {
+            let target_dir = PathBuf::from(target_dir_str);
+            for _ in 0..15 {
+                if !target_dir.exists() || fs::remove_dir_all(&target_dir).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        notify_shell_icon_change();
+        return true;
+    }
+
+    // 4. Uninstall invocation (via Windows Settings / Control Panel or CLI)
     let is_uninstall = args.iter().any(|a| {
         a.eq_ignore_ascii_case("--uninstall")
             || a.eq_ignore_ascii_case("--uninstall-silent")
@@ -212,7 +246,11 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
         notify_shell_icon_change();
 
         if launch_after {
-            let _ = Command::new(&target_exe).spawn();
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            let _ = Command::new(&target_exe)
+                .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+                .spawn();
         }
     }
 
@@ -366,18 +404,10 @@ pub fn apply_update_package(package_path: &str) -> Result<(), String> {
         fs::copy(src, &staged).map_err(|e| format!("Failed to stage update package: {}", e))?;
         let _ = fs::remove_file(format!("{}:Zone.Identifier", staged.to_string_lossy()));
 
-        let target_exe = get_default_install_dir().join("PDFForge.exe");
-        let bat_path = std::env::temp_dir().join(format!("pdfforge_update_{}.cmd", std::process::id()));
-        let bat_content = format!(
-            "@echo off\r\nping 127.0.0.1 -n 2 >nul\r\ntaskkill /f /im PDFForge.exe >nul 2>&1\r\ntaskkill /f /im PDFForge-Rust.exe >nul 2>&1\r\nping 127.0.0.1 -n 2 >nul\r\n\"{staged}\" --install-silent\r\ndel /f /q \"{staged}\" >nul 2>&1\r\nif exist \"{target}\" start \"\" \"{target}\"\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
-            staged = staged.to_string_lossy(),
-            target = target_exe.to_string_lossy()
-        );
-        fs::write(&bat_path, bat_content).map_err(|e| format!("Failed to write update helper: {}", e))?;
-        Command::new("cmd")
+        let current_pid = std::process::id();
+        Command::new(&staged)
             .current_dir(std::env::temp_dir())
-            .arg("/C")
-            .arg(&bat_path)
+            .args(["--apply-update-from", &current_pid.to_string()])
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()
             .map_err(|e| format!("Failed to start background updater: {}", e))?;
@@ -606,72 +636,65 @@ pub fn check_release_manifest(manifest_url: &str) -> serde_json::Value {
     }
 }
 
-pub fn run_uninstall() {
+pub fn uninstall_app_internally(delete_user_data: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         const DETACHED_PROCESS: u32 = 0x00000008;
 
-        let args: Vec<String> = std::env::args().collect();
-        let silent = args.iter().any(|a| {
-            a.eq_ignore_ascii_case("--uninstall-silent")
-                || a.eq_ignore_ascii_case("--silent")
-                || a.eq_ignore_ascii_case("/S")
-                || a.eq_ignore_ascii_case("-s")
-        });
-
         // Release any current working directory lock inside the install directory before deleting files.
         let temp_dir = std::env::temp_dir();
         let _ = std::env::set_current_dir(&temp_dir);
 
-        // Terminate any running PDFForge instances (excluding our own PID).
+        // Terminate any other running PDFForge instances (excluding our own PID).
         let pid_filter = format!("PID ne {}", std::process::id());
         run_hidden("taskkill", &["/F", "/FI", &pid_filter, "/IM", "PDFForge.exe"]);
         run_hidden("taskkill", &["/F", "/FI", &pid_filter, "/IM", "Uninstall-PDFForge.exe"]);
-        std::thread::sleep(std::time::Duration::from_millis(350));
+        std::thread::sleep(std::time::Duration::from_millis(250));
 
         // 1. Clean Windows Registry uninstall entry, ProgID, file associations, and App Paths.
         let uninst_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDFForge";
         let progid_key = r"HKCU\Software\Classes\PDFForge.Document";
         let pdf_openwith_key = r"HKCU\Software\Classes\.pdf\OpenWithProgids";
         let app_paths_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\PDFForge.exe";
+        let app_reg_key = r"HKCU\Software\Classes\Applications\PDFForge.exe";
 
         run_hidden("reg", &["delete", uninst_key, "/f"]);
         run_hidden("reg", &["delete", progid_key, "/f"]);
         run_hidden("reg", &["delete", pdf_openwith_key, "/v", "PDFForge.Document", "/f"]);
         run_hidden("reg", &["delete", app_paths_key, "/f"]);
+        run_hidden("reg", &["delete", app_reg_key, "/f"]);
 
-        // 2. Remove Desktop and Start Menu shortcuts.
-        let ps_cleanup = "\
-            $desk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'PDFForge.lnk'; \
-            if (Test-Path $desk) { Remove-Item $desk -Force -ErrorAction SilentlyContinue }; \
-            $sm = Join-Path ([Environment]::GetFolderPath('Programs')) 'PDFForge.lnk'; \
-            if (Test-Path $sm) { Remove-Item $sm -Force -ErrorAction SilentlyContinue };";
-        run_hidden("powershell", &["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_cleanup]);
+        // 2. Remove Desktop and Start Menu shortcuts directly in Rust without spawning powershell
+        if let Some(user_profile) = env::var_os("USERPROFILE") {
+            let desk_lnk = PathBuf::from(&user_profile).join("Desktop").join("PDFForge.lnk");
+            let _ = fs::remove_file(desk_lnk);
+        }
+        if let Some(app_data) = env::var_os("APPDATA") {
+            let sm_lnk = PathBuf::from(&app_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("PDFForge.lnk");
+            let _ = fs::remove_file(sm_lnk);
+        }
 
-        // 3. Remove unlocked application files from %LOCALAPPDATA%\Programs\PDFForge (and exe parent if applicable).
-        let current_exe = std::env::current_exe().ok();
-        let install_dir = get_default_install_dir();
-        let mut dirs_to_clean = vec![install_dir.clone()];
-        if let Some(ref exe) = current_exe {
-            if let Some(parent) = exe.parent() {
-                let parent_name = parent
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_ascii_lowercase())
-                    .unwrap_or_default();
-                if parent_name == "pdfforge" && !dirs_to_clean.iter().any(|d| d == parent) {
-                    dirs_to_clean.push(parent.to_path_buf());
-                }
+        // 3. Remove user data if requested
+        if delete_user_data {
+            if let Some(app_data) = env::var_os("APPDATA") {
+                let user_dir = PathBuf::from(app_data).join("pdfforge");
+                let _ = fs::remove_dir_all(user_dir);
             }
         }
 
+        // 4. Remove unlocked files from install dir
+        let install_dir = get_default_install_dir();
+        let current_exe = env::current_exe().ok();
         let current_exe_canon = current_exe.as_ref().and_then(|p| fs::canonicalize(p).ok());
-        for dir in &dirs_to_clean {
-            if !dir.exists() {
-                continue;
-            }
-            if let Ok(entries) = fs::read_dir(dir) {
+        if install_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&install_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_dir() {
@@ -687,64 +710,81 @@ pub fn run_uninstall() {
                             if fs::remove_file(&p).is_ok() {
                                 break;
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(120));
+                            std::thread::sleep(std::time::Duration::from_millis(80));
                         }
                     }
                 }
             }
-            let _ = fs::remove_dir(dir);
         }
+
+        // 5. Stage a detached uninstaller worker in %TEMP% to delete the install folder after process exits
+        let worker_path = temp_dir.join(format!("PDFForge-Uninstall-Worker-{}.exe", std::process::id()));
+        if let Some(ref exe) = current_exe {
+            let _ = fs::copy(exe, &worker_path);
+        } else {
+            let fallback_exe = install_dir.join("PDFForge.exe");
+            let _ = fs::copy(fallback_exe, &worker_path);
+        }
+
+        let current_pid = std::process::id();
+        let _ = Command::new(&worker_path)
+            .current_dir(&temp_dir)
+            .args([
+                "--uninstall-worker",
+                &current_pid.to_string(),
+                &install_dir.to_string_lossy(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn();
 
         notify_shell_icon_change();
-
-        if !silent {
-            let _ = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Info)
-                .set_title("PDFForge Studio Uninstaller")
-                .set_description("PDFForge Studio has been completely uninstalled.\n\nAll program executables, shortcuts, file associations, and registry entries have been removed.")
-                .set_buttons(rfd::MessageButtons::Ok)
-                .show();
-        }
-
-        // 4. Spawn detached cmd.exe right before exit to delete the running uninstaller binary and remaining install folder.
-        let self_in_install_dir = current_exe
-            .as_ref()
-            .and_then(|exe| exe.parent())
-            .map(|p| dirs_to_clean.iter().any(|d| d.eq_ignore_ascii_case_win(p)))
-            .unwrap_or(false);
-
-        if self_in_install_dir || dirs_to_clean.iter().any(|d| d.exists()) {
-            let exe_del = current_exe
-                .as_ref()
-                .filter(|_| self_in_install_dir)
-                .map(|p| format!("del /f /q \"{}\" >nul 2>&1\r\n", p.to_string_lossy()))
-                .unwrap_or_default();
-            let dir_path_str = install_dir.to_string_lossy().to_string();
-            let bat_path = temp_dir.join(format!("pdfforge_cleanup_{}.cmd", std::process::id()));
-            let bat_content = format!(
-                "@echo off\r\nfor /L %%i in (1,1,15) do (\r\n  ping 127.0.0.1 -n 2 >nul\r\n  {exe_del}  rmdir /s /q \"{dir}\" >nul 2>&1\r\n  if not exist \"{dir}\" goto done\r\n)\r\n:done\r\ndel /f /q \"%~f0\" >nul 2>&1\r\n",
-                exe_del = exe_del,
-                dir = dir_path_str
-            );
-            if fs::write(&bat_path, bat_content).is_ok() {
-                let _ = Command::new("cmd")
-                    .current_dir(&temp_dir)
-                    .arg("/C")
-                    .arg(&bat_path)
-                    .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-                    .spawn();
-            }
-        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = delete_user_data;
+        Ok(())
     }
 }
 
-trait PathEqWin {
-    fn eq_ignore_ascii_case_win(&self, other: &std::path::Path) -> bool;
-}
+pub fn run_uninstall() {
+    let args: Vec<String> = env::args().collect();
+    let is_silent = args.iter().any(|a| {
+        a.eq_ignore_ascii_case("--uninstall-silent")
+            || a.eq_ignore_ascii_case("--silent")
+            || a.eq_ignore_ascii_case("/S")
+            || a.eq_ignore_ascii_case("-s")
+    });
+    if !is_silent {
+        let confirm = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("PDFForge Studio Uninstaller")
+            .set_description("Are you sure you want to completely uninstall PDFForge Studio from your computer?")
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if confirm != rfd::MessageDialogResult::Yes {
+            return;
+        }
 
-impl PathEqWin for std::path::PathBuf {
-    fn eq_ignore_ascii_case_win(&self, other: &std::path::Path) -> bool {
-        self.to_string_lossy().eq_ignore_ascii_case(&other.to_string_lossy())
+        let remove_data = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title("Remove User Data")
+            .set_description("Do you also want to remove your personal settings, recent files list, and preferences?")
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show() == rfd::MessageDialogResult::Yes;
+
+        let _ = uninstall_app_internally(remove_data);
+
+        let _ = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title("PDFForge Studio Uninstaller")
+            .set_description("PDFForge Studio has been completely uninstalled.\n\nAll program files, shortcuts, and registry entries have been removed.")
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    } else {
+        let _ = uninstall_app_internally(false);
     }
 }
+
+
 

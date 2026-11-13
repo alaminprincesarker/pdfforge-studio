@@ -80,6 +80,7 @@ pub fn open_multiple_files_dialog_titled(title: Option<&str>) -> OpenMultipleFil
     }
 }
 
+#[allow(dead_code)]
 pub fn open_multiple_files_dialog() -> OpenMultipleFilesDialogResponse {
     open_multiple_files_dialog_titled(None)
 }
@@ -128,6 +129,7 @@ pub fn show_in_folder(file_path: &str) {
     }
 }
 
+#[allow(dead_code)]
 pub fn open_mailto(subject: Option<&str>) {
     open_mailto_to(None, subject);
 }

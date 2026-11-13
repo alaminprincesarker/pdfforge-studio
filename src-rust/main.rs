@@ -228,6 +228,7 @@ struct DeleteSignaturePayload {
     id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MailtoPayload {
@@ -631,8 +632,11 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     repairInstallation: async function () {
       return await apiPostJson('/app/repairInstallation', {});
     },
-    uninstallApp: async function () {
-      return await apiPostJson('/app/uninstallApp', {});
+    uninstallApp: async function (opts) {
+      return await apiPostJson('/app/uninstallApp', opts || {});
+    },
+    quitApp: async function () {
+      sendWindowCmd('close');
     },
 
     // Listeners
@@ -1044,20 +1048,17 @@ fn handle_api_request(
             });
         }
         "/__rust_api__/app/uninstallApp" => {
-            let uninst_in_dir = installer::get_default_install_dir().join("Uninstall-PDFForge.exe");
-            let exe = if uninst_in_dir.exists() {
-                uninst_in_dir
-            } else {
-                std::env::current_exe().unwrap_or(uninst_in_dir)
-            };
-            let spawned = std::process::Command::new(&exe)
-                .arg("--uninstall")
-                .spawn()
-                .is_ok();
-            responder.respond(json_response(StatusCode::OK, &json!({ "ok": spawned })));
-            if spawned {
+            let delete_user_data = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("deleteUserData").and_then(|b| b.as_bool()))
+                .unwrap_or(false);
+            let res = installer::uninstall_app_internally(delete_user_data);
+            let ok = res.is_ok();
+            let err_msg = res.err().unwrap_or_default();
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok, "error": err_msg })));
+            if ok {
                 thread::spawn(|| {
-                    thread::sleep(std::time::Duration::from_millis(250));
+                    thread::sleep(std::time::Duration::from_millis(600));
                     std::process::exit(0);
                 });
             }

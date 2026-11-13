@@ -27,6 +27,62 @@
         -webkit-user-select: text !important;
         user-select: text !important;
       }
+
+      /* Polished GPU-accelerated UI Animations for Open/Close Actions */
+      @keyframes pdfforgeFadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      @keyframes pdfforgeScaleIn {
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      @keyframes pdfforgeSlideDown {
+        from { opacity: 0; transform: translateY(-8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes pdfforgeSlideInLeft {
+        from { opacity: 0; transform: translateX(-20px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes pdfforgeSlideInRight {
+        from { opacity: 0; transform: translateX(20px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+
+      .pdfforge-modal-backdrop, [data-pdfforge-modal] {
+        animation: pdfforgeFadeIn 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+      }
+      .pdfforge-modal-content, [data-pdfforge-modal] > div {
+        animation: pdfforgeScaleIn 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+      }
+      .pdfforge-dropdown-menu, [role="menu"] {
+        animation: pdfforgeSlideDown 140ms cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+      }
+      .pdfforge-sidebar-left {
+        animation: pdfforgeSlideInLeft 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+      }
+      .pdfforge-sidebar-right {
+        animation: pdfforgeSlideInRight 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+      }
+
+      /* Hover, active, focus transitions for buttons, tabs, menu items */
+      button, [role="button"], a {
+        transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease, opacity 140ms ease, transform 100ms ease, box-shadow 140ms ease;
+      }
+      button:active:not(:disabled), [role="button"]:active:not(:disabled) {
+        transform: scale(0.97);
+      }
+
+      /* Respect prefers-reduced-motion */
+      @media (prefers-reduced-motion: reduce) {
+        *, ::before, ::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
     </style>
   </head>
   <body class="bg-viewer text-white overflow-hidden m-0 p-0 antialiased font-sans">

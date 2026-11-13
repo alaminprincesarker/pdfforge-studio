@@ -228,7 +228,21 @@ mod win {
     pub fn window_hwnd(window: &tao::window::Window) -> isize {
         window.hwnd() as isize
     }
+
+    pub fn wait_for_process_exit(pid: u32, timeout_ms: u32) {
+        let start = std::time::Instant::now();
+        let max = std::time::Duration::from_millis(timeout_ms as u64);
+        while is_process_alive(pid) && start.elapsed() < max {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 }
+
+#[cfg(target_os = "windows")]
+pub use win::wait_for_process_exit;
+
+#[cfg(not(target_os = "windows"))]
+pub fn wait_for_process_exit(_pid: u32, _timeout_ms: u32) {}
 
 fn send_paths_to_endpoint(ep: &InstanceEndpoint, pdf_paths: &[String]) -> bool {
     let payload_line = match serde_json::to_string(&ForwardPayload {
