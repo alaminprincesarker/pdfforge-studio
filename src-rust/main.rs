@@ -179,6 +179,8 @@ enum UserEvent {
     Maximize,
     Unmaximize,
     Close,
+    ConfirmClose(bool),
+    CloseTimeoutFallback,
     ToggleFullScreen,
     SetFullScreen(bool),
     DragWindow,
@@ -237,6 +239,7 @@ struct MailtoPayload {
 struct IpcWindowCommand {
     cmd: String,
     value: Option<bool>,
+    proceed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -431,7 +434,14 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
       sendWindowCmd('unmaximize');
     },
     closeWindow: async function () {
-      sendWindowCmd('close');
+      if (typeof window.__pdfforgeRequestClose === 'function') {
+        window.__pdfforgeRequestClose();
+      } else {
+        sendWindowCmd('close');
+      }
+    },
+    confirmClose: function (proceed) {
+      sendWindowCmd('confirmClose', !!proceed);
     },
     startDragWindow: function () {
       sendWindowCmd('dragWindow');
@@ -1172,6 +1182,7 @@ fn main() {
     let ready_for_protocol = Arc::clone(&webview_ready);
     let proxy_for_ipc = proxy.clone();
     let proxy_for_drop = proxy.clone();
+    let proxy_for_close = proxy.clone();
 
     let mut init_script = INIT_BRIDGE_SCRIPT.to_string();
     if !cli_pdfs.is_empty() {
@@ -1287,6 +1298,10 @@ fn main() {
                     "close" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::Close);
                     }
+                    "confirmClose" => {
+                        let proceed = parsed.proceed.or(parsed.value).unwrap_or(false);
+                        let _ = proxy_for_ipc.send_event(UserEvent::ConfirmClose(proceed));
+                    }
                     "toggleFullScreen" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::ToggleFullScreen);
                     }
@@ -1314,6 +1329,7 @@ fn main() {
     let mut last_maximized = window.is_maximized();
     let mut last_fullscreen = window.fullscreen().is_some();
     let mut was_maximized_before_fs = true;
+    let mut close_pending = false;
 
     let sync_webview_bounds = |win: &tao::window::Window, wv: &wry::WebView| {
         let size = win.inner_size();
@@ -1333,10 +1349,17 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                #[cfg(target_os = "windows")]
-                win32_frame::hide_instantly_before_close(&window);
-                window.set_visible(false);
-                *control_flow = ControlFlow::Exit;
+                if !close_pending {
+                    close_pending = true;
+                    let _ = webview.evaluate_script(
+                        "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
+                    );
+                    let p_close = proxy_for_close.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(2500));
+                        let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
+                    });
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_),
@@ -1387,10 +1410,35 @@ fn main() {
                     );
                 }
                 UserEvent::Close => {
-                    #[cfg(target_os = "windows")]
-                    win32_frame::hide_instantly_before_close(&window);
-                    window.set_visible(false);
-                    *control_flow = ControlFlow::Exit;
+                    if !close_pending {
+                        close_pending = true;
+                        let _ = webview.evaluate_script(
+                            "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
+                        );
+                        let p_close = proxy_for_close.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(2500));
+                            let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
+                        });
+                    }
+                }
+                UserEvent::ConfirmClose(proceed) => {
+                    if proceed {
+                        #[cfg(target_os = "windows")]
+                        win32_frame::hide_instantly_before_close(&window);
+                        window.set_visible(false);
+                        *control_flow = ControlFlow::Exit;
+                    } else {
+                        close_pending = false;
+                    }
+                }
+                UserEvent::CloseTimeoutFallback => {
+                    if close_pending && !webview_ready.load(Ordering::SeqCst) {
+                        #[cfg(target_os = "windows")]
+                        win32_frame::hide_instantly_before_close(&window);
+                        window.set_visible(false);
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
                 fs_ev @ (UserEvent::ToggleFullScreen | UserEvent::SetFullScreen(_)) => {
                     let next = match fs_ev {
