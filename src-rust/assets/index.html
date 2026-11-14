@@ -83,9 +83,124 @@
           scroll-behavior: auto !important;
         }
       }
+    
+      /* Universal Dialog / Modal Top Priority Stacking & Interactivity */
+      [data-pdfforge-modal], .pdfforge-modal-backdrop, [role="dialog"] {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 999999 !important;
+        pointer-events: auto !important;
+        isolation: isolate !important;
+      }
+      [data-pdfforge-modal] *, .pdfforge-modal-backdrop * {
+        pointer-events: auto;
+      }
+      [data-pdfforge-close], button[data-pdfforge-close], [data-dismiss-modal] {
+        pointer-events: auto !important;
+        cursor: pointer !important;
+        position: relative !important;
+        z-index: 100 !important;
+      }
+      [data-pdfforge-close] *, button[data-pdfforge-close] *, [data-dismiss-modal] * {
+        pointer-events: none !important;
+      }
+      .z-\[100\], .z-\[110\], .z-100 {
+        z-index: 999999 !important;
+      }
+
     </style>
   </head>
   <body class="bg-viewer text-white overflow-hidden m-0 p-0 antialiased font-sans">
     <div id="root" class="h-screen w-screen flex flex-col overflow-hidden"></div>
+  
+    <script>
+      (function() {
+        if (window.__pdfforgeGlobalDialogInit) return;
+        window.__pdfforgeGlobalDialogInit = true;
+
+        function closeAllModals(source) {
+          try {
+            if (window.qt && typeof window.qt.setState === 'function') {
+              window.qt.setState({
+                showAboutModal: false,
+                showUpdateModal: false,
+                showHelpModal: false,
+                showSettingsModal: false,
+                showSignatureModal: false
+              });
+            }
+          } catch (_) {}
+          try {
+            window.dispatchEvent(new CustomEvent('pdfforge-close-all-modals', { detail: { source: source || 'generic' } }));
+          } catch (_) {}
+        }
+
+        function isModalElement(el) {
+          if (!el) return false;
+          return !!(el.closest && (el.closest('[data-pdfforge-modal]') || el.closest('[role="dialog"]')));
+        }
+
+        function onGlobalPointer(ev) {
+          var target = ev.target;
+          if (!target) return;
+
+          // 1. Check if user clicked a designated close button or cross symbol
+          var closeBtn = target.closest && target.closest('[data-pdfforge-close], button[data-pdfforge-close], [data-dismiss-modal]');
+          if (!closeBtn && target.closest) {
+            var btn = target.closest('button');
+            if (btn && isModalElement(btn)) {
+              var txt = (btn.textContent || '').trim().toLowerCase();
+              if (txt === 'close' || txt === 'cancel' || txt === 'no, later' || txt === 'discard changes') {
+                closeBtn = btn;
+              } else if (btn.querySelector('svg') && (btn.closest('.justify-between') || btn.classList.contains('cursor-pointer'))) {
+                // Header X icon
+                closeBtn = btn;
+              }
+            }
+          }
+
+          if (closeBtn) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+            closeAllModals('close-button');
+            return;
+          }
+
+          // 2. Check if user clicked directly on the modal backdrop
+          if (target.hasAttribute && target.hasAttribute('data-pdfforge-modal')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+            closeAllModals('backdrop');
+            return;
+          }
+        }
+
+        window.addEventListener('click', onGlobalPointer, { capture: true });
+        window.addEventListener('pointerup', onGlobalPointer, { capture: true });
+        window.addEventListener('mouseup', onGlobalPointer, { capture: true });
+
+        window.addEventListener('keydown', function(ev) {
+          if (ev.key === 'Escape') {
+            var modal = document.querySelector('[data-pdfforge-modal],[role="dialog"]');
+            var isModalActive = false;
+            try {
+              if (window.qt && window.qt.getState) {
+                var s = window.qt.getState();
+                isModalActive = !!(s && (s.showAboutModal || s.showUpdateModal || s.showHelpModal || s.showSettingsModal || s.showSignatureModal));
+              }
+            } catch (_) {}
+            if (modal || isModalActive) {
+              ev.preventDefault();
+              ev.stopPropagation();
+              if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+              closeAllModals('escape');
+            }
+          }
+        }, { capture: true });
+      })();
+    </script>
+
   </body>
 </html>
