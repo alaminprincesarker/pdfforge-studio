@@ -1,11 +1,11 @@
 {
-  "version": "1.1.0",
-  "tag": "v1.1.0",
-  "name": "PDFForge Studio v1.1.0 (Native Rust Edition)",
+  "version": "1.1.1",
+  "tag": "v1.1.1",
+  "name": "PDFForge Studio v1.1.1 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.0-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.1-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Full-screen presentation two-finger & multi-touch zoom fix, compact zero-top first page margins, optimized inter-page separation, and perfect fit-to-height rendering."
+  "notes": "Scoped scroll & page navigation for all open tabs, stable zoom position centering, developer email feedback option in Help, and polished update modal interactivity with silent background checks."
 }
