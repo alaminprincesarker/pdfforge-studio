@@ -9,14 +9,14 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ReleaseDir = Join-Path $RepoRoot "release"
-$PortableDir = Join-Path $ReleaseDir "PDFForge-1.1.9-Windows-x64-Portable"
+$PortableDir = Join-Path $ReleaseDir "PDFForge-1.1.10-Windows-x64-Portable"
 $CertSubject = "CN=Md. Alamin (PDFForge Studio), O=PDFForge Studio, E=alaminprincesarker@gmail.com"
 $FriendlyName = "PDFForge Studio Code Signing"
 
 $Targets = @(
     (Join-Path $ReleaseDir "PDFForge-Rust.exe"),
     (Join-Path $ReleaseDir "PDFForge.exe"),
-    (Join-Path $ReleaseDir "PDFForge-Setup-1.1.9-Windows-x64.exe"),
+    (Join-Path $ReleaseDir "PDFForge-Setup-1.1.10-Windows-x64.exe"),
     (Join-Path $ReleaseDir "Uninstall-PDFForge.exe"),
     (Join-Path $PortableDir "PDFForge.exe")
 ) | Where-Object { Test-Path $_ }
@@ -85,8 +85,8 @@ if (Test-Path $wv) {
     Unblock-File -Path $wv -ErrorAction SilentlyContinue
     (Get-Item $wv).LastWriteTime = Get-Date
 }
-$zipPath = Join-Path $ReleaseDir "PDFForge-1.1.9-Windows-x64-Portable.zip"
+$zipPath = Join-Path $ReleaseDir "PDFForge-1.1.10-Windows-x64-Portable.zip"
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-tar -a -c -f $zipPath -C $ReleaseDir "PDFForge-1.1.9-Windows-x64-Portable"
+tar -a -c -f $zipPath -C $ReleaseDir "PDFForge-1.1.10-Windows-x64-Portable"
 Write-Host "Repacked signed Portable ZIP: $zipPath"
 
