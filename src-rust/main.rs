@@ -599,7 +599,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.1.7';
+      return '1.1.8';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
