@@ -3,8 +3,8 @@
 1 24 "src-rust/app.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,1,2,0
-PRODUCTVERSION 1,1,2,0
+FILEVERSION 1,1,3,0
+PRODUCTVERSION 1,1,3,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Md. Alamin (PDFForge Studio)"
             VALUE "FileDescription", "PDFForge - Native Rust Desktop PDF Reader & Editor"
-            VALUE "FileVersion", "1.1.2.0"
+            VALUE "FileVersion", "1.1.3.0"
             VALUE "InternalName", "PDFForge"
             VALUE "LegalCopyright", "Copyright (C) 2026 Md. Alamin (alaminprincesarker@gmail.com)"
             VALUE "OriginalFilename", "PDFForge.exe"
             VALUE "ProductName", "PDFForge Studio"
-            VALUE "ProductVersion", "1.1.2"
+            VALUE "ProductVersion", "1.1.3"
             VALUE "Comments", "100% Offline Native Rust Desktop PDF Reader & Editor"
         END
     END
