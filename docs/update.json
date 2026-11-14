@@ -7,5 +7,5 @@
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
   "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.5-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Smooth scroll-to-next/previous page navigation in fullscreen mode and seamless restoration of normal mode zoom and position when exiting fullscreen."
+  "notes": "Smooth scroll-to-next/previous page navigation in fullscreen, bidirectional page number preservation between fullscreen and normal mode, smooth mode transition effects, and previous-mode zoom restoration."
 }
