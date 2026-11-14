@@ -1,11 +1,11 @@
 {
-  "version": "1.1.3",
-  "tag": "v1.1.3",
-  "name": "PDFForge Studio v1.1.3 (Native Rust Edition)",
+  "version": "1.1.5",
+  "tag": "v1.1.5",
+  "name": "PDFForge Studio v1.1.5 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.3-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.5-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "First-priority dialog dismissal and responsive stacking across all tabs: reliable close button, header X cross symbol, backdrop click, and Escape key dismissal when PDFs are open."
+  "notes": "Smooth scroll-to-next/previous page navigation in fullscreen mode and seamless restoration of normal mode zoom and position when exiting fullscreen."
 }
