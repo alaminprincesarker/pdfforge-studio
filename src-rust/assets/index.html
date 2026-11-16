@@ -2,17 +2,21 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self' 'unsafe-inline' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' blob: data:;"
     />
     <title>PDFForge</title>
+    <script type="module">
+      import * as AcrobatPro from "./assets/acrobat-pro.js";
+      window.__acrobatPro = AcrobatPro;
+    </script>
     <script type="module" crossorigin src="./assets/index-11jbxaY0.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-ClXAvMiX.css">
     <style>
       html, body, #root {
-        touch-action: pan-x pan-y pinch-zoom;
+        touch-action: pan-x pan-y;
         overscroll-behavior: none;
         border: none !important;
         outline: none !important;
@@ -108,6 +112,21 @@
         z-index: 999999 !important;
       }
 
+      /* Bundled Offline Fonts for Live Font Preview & Acrobat Text Reflow */
+      @font-face { font-family: 'Noto Sans'; src: url('./fonts/NotoSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Noto Serif'; src: url('./fonts/NotoSerif-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Noto Sans Bengali'; src: url('./fonts/NotoSansBengali-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Noto Sans Mono'; src: url('./fonts/NotoSansMono-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Roboto'; src: url('./fonts/Roboto-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Open Sans'; src: url('./fonts/OpenSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Source Sans 3'; src: url('./fonts/SourceSans3-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-BoldItalic.ttf') format('truetype'); font-weight: 700; font-style: italic; font-display: swap; }
     </style>
   </head>
   <body class="bg-viewer text-white overflow-hidden m-0 p-0 antialiased font-sans">
@@ -143,6 +162,11 @@
         function onGlobalPointer(ev) {
           var target = ev.target;
           if (!target) return;
+          // If the modal opts into React-managed close/confirmation (e.g. Combine Files, Print), do not hijack its buttons
+          var modalEl = target.closest && target.closest('[data-pdfforge-modal],[role="dialog"]');
+          if (modalEl && modalEl.hasAttribute('data-pdfforge-managed')) {
+            return;
+          }
 
           // 1. Check if user clicked a designated close button or cross symbol
           var closeBtn = target.closest && target.closest('[data-pdfforge-close], button[data-pdfforge-close], [data-dismiss-modal]');
@@ -153,7 +177,6 @@
               if (txt === 'close' || txt === 'cancel' || txt === 'no, later' || txt === 'discard changes') {
                 closeBtn = btn;
               } else if (btn.querySelector('svg') && (btn.closest('.justify-between') || btn.classList.contains('cursor-pointer'))) {
-                // Header X icon
                 closeBtn = btn;
               }
             }
@@ -183,6 +206,8 @@
 
         window.addEventListener('keydown', function(ev) {
           if (ev.key === 'Escape') {
+            var managed = document.querySelector('[data-pdfforge-modal][data-pdfforge-managed]');
+            if (managed) return;
             var modal = document.querySelector('[data-pdfforge-modal],[role="dialog"]');
             var isModalActive = false;
             try {

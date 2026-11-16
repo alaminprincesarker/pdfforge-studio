@@ -6,10 +6,12 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=src-rust/wv2_shim.c");
     println!("cargo:rerun-if-changed=src-rust/WebView2Loader.dll");
+    println!("cargo:rerun-if-changed=src-rust/pdfium.dll");
     println!("cargo:rerun-if-changed=src-rust/app.rc");
     println!("cargo:rerun-if-changed=src-rust/icon.ico");
     println!("cargo:rerun-if-changed=src-rust/pdf_doc.ico");
     println!("cargo:rerun-if-changed=src-rust/assets/index.html");
+    println!("cargo:rerun-if-changed=src-rust/assets/assets/acrobat-pro.js");
     println!("cargo:rerun-if-changed=src-rust/assets/assets/index-11jbxaY0.js");
     println!("cargo:rerun-if-changed=src-rust/assets/assets/index-ClXAvMiX.css");
 

@@ -11,12 +11,14 @@ pub struct SaveFileResponse {
     pub error: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct RawPdfFile {
     pub bytes: Vec<u8>,
     pub file_name: String,
     pub size: u64,
 }
 
+#[allow(dead_code)]
 pub fn read_pdf_file(file_path: &str) -> Result<RawPdfFile, String> {
     let path = Path::new(file_path);
     if !path.exists() {

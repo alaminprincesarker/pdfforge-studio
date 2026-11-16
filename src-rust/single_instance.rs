@@ -358,8 +358,10 @@ pub fn try_acquire_or_forward(app_data_dir: &Path, pdf_paths: &[String]) -> Opti
     #[cfg(target_os = "windows")]
     let _boot_lock = win::acquire_boot_lock();
 
-    if try_forward_on_current_desktop(&instances_dir, pdf_paths) {
-        return None;
+    if !std::env::args().any(|a| a.eq_ignore_ascii_case("--new-window")) {
+        if try_forward_on_current_desktop(&instances_dir, pdf_paths) {
+            return None;
+        }
     }
 
     let pid = std::process::id();

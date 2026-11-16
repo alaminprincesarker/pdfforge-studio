@@ -1,6 +1,6 @@
 [package]
 name = "pdfforge"
-version = "1.1.10"
+version = "1.2.0"
 edition = "2021"
 description = "PDFForge - 100% Offline Desktop PDF Reader & Editor (Rust Native Edition)"
 authors = ["Md. Alamin <alaminprincesarker@gmail.com>"]
@@ -22,6 +22,12 @@ base64 = "0.22"
 rust-embed = "8.5"
 mime_guess = "2.0"
 http = "1.1"
+pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+lopdf = "0.47.0"
+rustybuzz = "0.20.1"
+ttf-parser = "0.25.1"
+fontdb = "0.24.0"
+unicode-bidi = "0.3.18"
 
 [profile.release]
 opt-level = 3

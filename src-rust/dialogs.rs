@@ -268,6 +268,9 @@ pub fn print_images_direct(
     copies: u16,
     orientation: &str,
     paper_size: &str,
+    duplex: &str,
+    scale_mode: &str,
+    custom_scale: f32,
     output_pdf_path: Option<&str>,
     pages: &[String],
 ) -> Result<(), String> {
@@ -341,6 +344,18 @@ if (-not $pd.PrinterSettings.IsValid) {{
     throw ('Selected printer is not valid or unavailable: ' + $targetPrinter)
 }}
 $pd.PrinterSettings.Copies = [int16]{copies}
+$duplexMode = '{duplex}'
+if ($pd.PrinterSettings.CanDuplex) {{
+    if ($duplexMode -eq 'long') {{
+        $pd.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Vertical
+    }} elseif ($duplexMode -eq 'short') {{
+        $pd.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Horizontal
+    }} else {{
+        $pd.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Simplex
+    }}
+}}
+$scaleMode = '{scale_mode}'
+$customScale = [double]{custom_scale}
 $outPdf = '{out_pdf}'
 if ($outPdf -and $outPdf.Length -gt 0) {{
     $pd.PrinterSettings.PrintToFile = $true
@@ -389,9 +404,17 @@ $pd.add_PrintPage({{
         $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
         $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $e.Graphics.FillRectangle([System.Drawing.Brushes]::White, $bounds)
-        $scale = [Math]::Min($bounds.Width / [double]$img.Width, $bounds.Height / [double]$img.Height)
-        $drawW = [float]($img.Width * $scale)
-        $drawH = [float]($img.Height * $scale)
+        if ($scaleMode -eq 'actual' -or $scaleMode -eq 'custom') {{
+            $factor = if ($scaleMode -eq 'custom') {{ [Math]::Max(0.1, [Math]::Min(4.0, $customScale / 100.0)) }} else {{ 1.0 }}
+            $dpiX = [Math]::Max(72.0, $img.HorizontalResolution)
+            $dpiY = [Math]::Max(72.0, $img.VerticalResolution)
+            $drawW = [float](($img.Width / $dpiX) * 100.0 * $factor)
+            $drawH = [float](($img.Height / $dpiY) * 100.0 * $factor)
+        }} else {{
+            $scale = [Math]::Min($bounds.Width / [double]$img.Width, $bounds.Height / [double]$img.Height)
+            $drawW = [float]($img.Width * $scale)
+            $drawH = [float]($img.Height * $scale)
+        }}
         $drawX = [float]($bounds.Left + ($bounds.Width - $drawW) / 2.0)
         $drawY = [float]($bounds.Top + ($bounds.Height - $drawH) / 2.0)
         $e.Graphics.DrawImage($img, $drawX, $drawY, $drawW, $drawH)
@@ -413,6 +436,9 @@ try {{
             out_pdf = out_pdf,
             paper = paper_size.trim().to_ascii_lowercase().replace('\'', "''"),
             orient = orientation.trim().to_ascii_lowercase().replace('\'', "''"),
+            duplex = duplex.trim().to_ascii_lowercase().replace('\'', "''"),
+            scale_mode = scale_mode.trim().to_ascii_lowercase().replace('\'', "''"),
+            custom_scale = custom_scale.clamp(10.0, 400.0),
         );
 
         if let Err(e) = std::fs::write(&ps1_path, ps1_script) {
@@ -468,7 +494,7 @@ try {{
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let res = {
-        let _ = (printer_name, copies, orientation, paper_size, output_pdf_path);
+        let _ = (printer_name, copies, orientation, paper_size, duplex, scale_mode, custom_scale, output_pdf_path);
         Err("Direct printing is supported on Windows and macOS.".to_string())
     };
 

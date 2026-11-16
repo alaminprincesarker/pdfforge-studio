@@ -1,11 +1,11 @@
 {
-  "version": "1.1.10",
-  "tag": "v1.1.10",
-  "name": "PDFForge Studio v1.1.10 (Native Rust Edition)",
+  "version": "1.2.0",
+  "tag": "v1.2.0",
+  "name": "PDFForge Studio v1.2.0 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.1.10-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.2.0-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "Restore original PF logo gradient color while keeping the softer eye-friendly toolbar accent, touchpad paging in Fit One Full Page & Read Mode, and single fullscreen button."
+  "notes": "PDFForge Studio v1.2.0: Acrobat-grade Rust text selection & object editing, Ctrl+Tab & pointer drag-and-drop tabs with per-tab view state restoration, responsive DPI-safe Print dialog with duplex & paper scaling, offline bundled & Bangla fonts, Adobe Acrobat context menus, smooth touchpad two-finger pinch zoom in normal & fullscreen modes, and fixed Combine Files dialog controls."
 }

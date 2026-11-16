@@ -31,3 +31,11 @@
 [data-pdfforge-modal] *{pointer-events:auto;}
 [data-pdfforge-close],button[data-pdfforge-close]{pointer-events:auto!important;cursor:pointer!important;position:relative!important;z-index:100!important;}
 [data-pdfforge-close] *,button[data-pdfforge-close] *{pointer-events:none!important;}
+
+/* PDFForge Tab Drag-and-Drop & Context Menu Helpers */
+.pdfforge-tab-drop-indicator{position:relative}
+.pdfforge-tab-armed{cursor:grab !important}
+.pdfforge-tab-armed:active{cursor:grabbing !important}
+@keyframes pdfforgeTabPop{from{transform:scale(0.96);opacity:0.75}to{transform:scale(1);opacity:1}}
+.pdfforge-tab-item{transition:transform .16s cubic-bezier(.22,1,.36,1),background-color .15s ease,box-shadow .15s ease}
+body.theme-light .pdfforge-print-surface{background:#ffffff;color:#111827}

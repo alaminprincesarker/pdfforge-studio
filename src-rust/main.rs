@@ -1,8 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dialogs;
+mod font_shaper;
 mod installer;
 mod pdf_engine;
+mod pdf_layout;
+mod pdf_objects;
+#[cfg(test)]
+mod pdf_tests;
 mod single_instance;
 mod store;
 
@@ -22,7 +27,11 @@ use tao::{
     window::{Fullscreen, WindowBuilder},
 };
 use wry::{RequestAsyncResponder, WebContext, WebViewBuilder};
+#[cfg(target_os = "windows")]
+use wry::WebViewBuilderExtWindows;
 
+use crate::pdf_layout::PdfWorkspaceEngine;
+use crate::pdf_objects::{commit_edit_text_block, commit_shape_operation, EditTextCommitRequest, ShapeCommitRequest};
 use crate::store::{AppDataStore, FileState, PartialAppSettings, RecentFile};
 
 #[derive(RustEmbed)]
@@ -30,7 +39,26 @@ use crate::store::{AppDataStore, FileState, PartialAppSettings, RecentFile};
 struct Assets;
 
 pub(crate) const WEBVIEW2_LOADER_BYTES: &[u8] = include_bytes!("WebView2Loader.dll");
+#[cfg(target_os = "windows")]
+pub(crate) const PDFIUM_DLL_BYTES: &[u8] = include_bytes!("pdfium.dll");
 const ICON_RGBA_BYTES: &[u8] = include_bytes!("icon_rgba.bin");
+
+#[cfg(target_os = "windows")]
+fn ensure_pdfium_dll_present(app_data_dir: &std::path::Path) {
+    let _ = fs::create_dir_all(app_data_dir);
+    let dll_path = app_data_dir.join("pdfium.dll");
+    if !dll_path.exists() {
+        let _ = fs::write(&dll_path, PDFIUM_DLL_BYTES);
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let local_dll = exe_dir.join("pdfium.dll");
+            if !local_dll.exists() {
+                let _ = fs::write(&local_dll, PDFIUM_DLL_BYTES);
+            }
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn ensure_webview2_loader_loaded(app_data_dir: &std::path::Path) {
@@ -253,12 +281,88 @@ struct DirectPrintPayload {
     orientation: String,
     #[serde(default)]
     paper_size: String,
+    #[serde(default = "default_duplex_mode")]
+    duplex: String,
+    #[serde(default = "default_scale_mode")]
+    scale_mode: String,
+    #[serde(default = "default_custom_scale")]
+    custom_scale: f32,
     output_pdf_path: Option<String>,
     pages: Vec<String>,
 }
 
 fn default_print_copies() -> u16 {
     1
+}
+
+fn default_duplex_mode() -> String {
+    "simplex".to_string()
+}
+
+fn default_scale_mode() -> String {
+    "fit".to_string()
+}
+
+fn default_custom_scale() -> f32 {
+    100.0
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatPagePayload {
+    file_path: String,
+    page: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatHitPayload {
+    file_path: String,
+    page: usize,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatSelectionPayload {
+    file_path: String,
+    page: usize,
+    start_char: usize,
+    end_char: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatShapeReflowPayload {
+    file_path: String,
+    page: usize,
+    text: String,
+    original_font: String,
+    font_family: String,
+    font_size: f32,
+    max_width: f32,
+    bold: bool,
+    italic: bool,
+    align: String,
+    line_spacing: f32,
+    bullets: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatEditTextPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: EditTextCommitRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatShapeCommitPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: ShapeCommitRequest,
 }
 
 fn guess_mime_type(path: &str) -> &'static str {
@@ -599,7 +703,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.1.10';
+      return '1.2.0';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -637,6 +741,55 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     },
     quitApp: async function () {
       sendWindowCmd('close');
+    },
+    openNewWindow: async function (filePath) {
+      return await apiPostJson('/app/openNewWindow', { filePath: filePath || '' });
+    },
+
+    // Acrobat Pro Offline Document Model, Shaping & Stream Editing
+    getPageLayout: async function (filePath, page) {
+      return await apiPostJson('/acrobat/getPageLayout', { filePath: filePath, page: page });
+    },
+    hitTest: async function (filePath, page, x, y) {
+      return await apiPostJson('/acrobat/hitTest', { filePath: filePath, page: page, x: x, y: y });
+    },
+    getSelectionRects: async function (filePath, page, startChar, endChar) {
+      return await apiPostJson('/acrobat/getSelectionRects', {
+        filePath: filePath,
+        page: page,
+        startChar: startChar,
+        endChar: endChar,
+      });
+    },
+    getObjects: async function (filePath, page) {
+      return await apiPostJson('/acrobat/getObjects', { filePath: filePath, page: page });
+    },
+    shapeReflowBlock: async function (payload) {
+      return await apiPostJson('/acrobat/shapeReflow', payload);
+    },
+    commitEditText: async function (payload) {
+      return await apiPostJson('/acrobat/commitEditText', payload);
+    },
+    commitShapeEdit: async function (payload) {
+      return await apiPostJson('/acrobat/commitShape', payload);
+    },
+    undoPdfEdit: async function (filePath) {
+      return await apiPostJson('/acrobat/undo', { filePath: filePath });
+    },
+    redoPdfEdit: async function (filePath) {
+      return await apiPostJson('/acrobat/redo', { filePath: filePath });
+    },
+    getWorkingPdf: async function (filePath) {
+      const res = await fetch('/__rust_api__/acrobat/getWorkingPdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: filePath }),
+      });
+      if (!res.ok) throw new Error('Failed to fetch working PDF bytes');
+      return await res.arrayBuffer();
+    },
+    listSystemFonts: async function () {
+      return await apiPostJson('/acrobat/listFonts', {});
     },
 
     // Listeners
@@ -680,6 +833,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
 
   // Prevent WebView2 from zooming the whole app UI on touchpad pinch;
   // ViewerCanvas handles Ctrl+Wheel / touchpad pinch directly on the PDF document.
+  // Use capture:true with ONLY preventDefault() (never stopPropagation()) so React still receives all events.
   window.addEventListener(
     'wheel',
     function (e) {
@@ -687,8 +841,66 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         e.preventDefault();
       }
     },
-    { passive: false, capture: false }
+    { passive: false, capture: true }
   );
+
+  // Desktop software behavior: suppress default browser context menu outside text inputs.
+  window.addEventListener(
+    'contextmenu',
+    function (e) {
+      if (e.defaultPrevented) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+      e.preventDefault();
+    },
+    { capture: false }
+  );
+
+  // Desktop accelerator protection: prevent browser devtools/view-source/reload keys
+  // and ensure Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+PageUp / Ctrl+PageDown stay app-handled.
+  // Also block native WebView2 browser zoom hotkeys (Ctrl+Plus/Minus/0) while letting React zoom the PDF.
+  window.addEventListener(
+    'keydown',
+    function (e) {
+      var k = (e.key || '').toLowerCase();
+      if (
+        e.key === 'F12' ||
+        e.key === 'F5' ||
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) ||
+        ((e.ctrlKey || e.metaKey) && !e.shiftKey && (k === 'u' || k === 'r'))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === '=' || k === '+' || k === '-' || k === '_' || k === '0')) {
+        e.preventDefault();
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'Tab' || e.key === 'PageUp' || e.key === 'PageDown')) {
+        window.dispatchEvent(new CustomEvent('pdfforge-tab-nav-key', {
+          detail: { key: e.key, shiftKey: !!e.shiftKey }
+        }));
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    { capture: true }
+  );
+
+  window.pdfAcrobat = {
+    getPageLayout: function (fp, page) { return window.electronAPI.getPageLayout(fp, page); },
+    hitTest: function (fp, page, x, y) { return window.electronAPI.hitTest(fp, page, x, y); },
+    getSelectionRects: function (fp, page, s, e) { return window.electronAPI.getSelectionRects(fp, page, s, e); },
+    getObjects: function (fp, page) { return window.electronAPI.getObjects(fp, page); },
+    shapeReflowBlock: function (p) { return window.electronAPI.shapeReflowBlock(p); },
+    commitEditText: function (p) { return window.electronAPI.commitEditText(p); },
+    commitShapeEdit: function (p) { return window.electronAPI.commitShapeEdit(p); },
+    undo: function (fp) { return window.electronAPI.undoPdfEdit(fp); },
+    redo: function (fp) { return window.electronAPI.redoPdfEdit(fp); },
+    getWorkingPdf: function (fp) { return window.electronAPI.getWorkingPdf(fp); },
+    listSystemFonts: function () { return window.electronAPI.listSystemFonts(); }
+  };
 
   window.addEventListener('error', function (e) {
     fetch('/__rust_api__/diag', {
@@ -720,6 +932,7 @@ fn handle_api_request(
     store: Arc<Mutex<AppDataStore>>,
     pending_boot_open_files: Arc<Mutex<Vec<String>>>,
     webview_ready: Arc<AtomicBool>,
+    pdf_workspace: PdfWorkspaceEngine,
     responder: RequestAsyncResponder,
 ) {
     match uri_path {
@@ -749,13 +962,19 @@ fn handle_api_request(
             let payload: Result<PathPayload, _> = serde_json::from_slice(&body);
             match payload {
                 Ok(p) => {
-                    thread::spawn(move || match pdf_engine::read_pdf_file(&p.file_path) {
-                        Ok(raw) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || match ws.load_or_sync_from_disk(&p.file_path) {
+                        Ok(bytes) => {
+                            let file_name = std::path::Path::new(&p.file_path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "document.pdf".to_string());
+                            let sz = bytes.len() as u64;
                             responder.respond(binary_response(
                                 StatusCode::OK,
-                                raw.bytes,
-                                &raw.file_name,
-                                raw.size,
+                                bytes,
+                                &file_name,
+                                sz,
                             ));
                         }
                         Err(err) => {
@@ -791,8 +1010,12 @@ fn handle_api_request(
                 return;
             }
 
+            let ws = pdf_workspace.clone();
             thread::spawn(move || {
                 let res = pdf_engine::save_pdf_file(&file_path, &body);
+                if res.success {
+                    ws.register_bytes_for_path(&file_path, body);
+                }
                 responder.respond(json_response(StatusCode::OK, &res));
             });
         }
@@ -1079,6 +1302,9 @@ fn handle_api_request(
                             p.copies,
                             &p.orientation,
                             &p.paper_size,
+                            &p.duplex,
+                            &p.scale_mode,
+                            p.custom_scale,
                             p.output_pdf_path.as_deref(),
                             &p.pages,
                         ) {
@@ -1111,6 +1337,274 @@ fn handle_api_request(
                 StatusCode::OK,
                 &json!({ "ok": true, "pendingFiles": drained }),
             ));
+        }
+        "/__rust_api__/acrobat/getPageLayout" => {
+            match serde_json::from_slice::<AcrobatPagePayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || match ws.get_page_layout(&p.file_path, p.page) {
+                        Ok(layout) => responder.respond(json_response(StatusCode::OK, &*layout)),
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::BAD_REQUEST,
+                            &json!({ "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/hitTest" => {
+            match serde_json::from_slice::<AcrobatHitPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || match ws.hit_test(&p.file_path, p.page, p.x, p.y) {
+                        Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::BAD_REQUEST,
+                            &json!({ "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/getSelectionRects" => {
+            match serde_json::from_slice::<AcrobatSelectionPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.get_selection_rects(&p.file_path, p.page, p.start_char, p.end_char)
+                        {
+                            Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/getObjects" => {
+            match serde_json::from_slice::<AcrobatPagePayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || match ws.get_objects(&p.file_path, p.page) {
+                        Ok(objs) => responder.respond(json_response(StatusCode::OK, &*objs)),
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::BAD_REQUEST,
+                            &json!({ "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/shapeReflow" => {
+            match serde_json::from_slice::<AcrobatShapeReflowPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let bytes_opt = ws.get_working_bytes(&p.file_path).ok();
+                        let lo_opt = bytes_opt
+                            .as_ref()
+                            .and_then(|b| lopdf::Document::load_mem(b).ok());
+                        let page_id_opt = lo_opt
+                            .as_ref()
+                            .and_then(|d| d.get_pages().get(&(p.page as u32)).copied());
+                        let res = font_shaper::shape_and_reflow_block(
+                            lo_opt.as_ref(),
+                            page_id_opt,
+                            &p.text,
+                            &p.original_font,
+                            &p.font_family,
+                            p.font_size,
+                            p.max_width,
+                            p.bold,
+                            p.italic,
+                            &p.align,
+                            p.line_spacing,
+                            p.bullets,
+                        );
+                        responder.respond(json_response(StatusCode::OK, &res));
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/commitEditText" => {
+            match serde_json::from_slice::<AcrobatEditTextPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.req.page, |doc| {
+                            commit_edit_text_block(doc, &p.req)
+                        }) {
+                            Ok((rev, can_undo, can_redo, notice)) => responder.respond(
+                                json_response(
+                                    StatusCode::OK,
+                                    &json!({
+                                        "ok": true,
+                                        "revision": rev,
+                                        "canUndo": can_undo,
+                                        "canRedo": can_redo,
+                                        "notice": notice
+                                    }),
+                                ),
+                            ),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/commitShape" => {
+            match serde_json::from_slice::<AcrobatShapeCommitPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.req.page, |doc| {
+                            commit_shape_operation(doc, &p.req).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({
+                                    "ok": true,
+                                    "revision": rev,
+                                    "canUndo": can_undo,
+                                    "canRedo": can_redo
+                                }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/undo" => match serde_json::from_slice::<PathPayload>(&body) {
+            Ok(p) => {
+                let ws = pdf_workspace.clone();
+                thread::spawn(move || match ws.undo(&p.file_path) {
+                    Ok((_, rev, can_undo, can_redo)) => responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "ok": true,
+                            "revision": rev,
+                            "canUndo": can_undo,
+                            "canRedo": can_redo
+                        }),
+                    )),
+                    Err(e) => responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({ "ok": false, "error": e }),
+                    )),
+                });
+            }
+            Err(e) => responder.respond(json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({ "ok": false, "error": e.to_string() }),
+            )),
+        },
+        "/__rust_api__/acrobat/redo" => match serde_json::from_slice::<PathPayload>(&body) {
+            Ok(p) => {
+                let ws = pdf_workspace.clone();
+                thread::spawn(move || match ws.redo(&p.file_path) {
+                    Ok((_, rev, can_undo, can_redo)) => responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "ok": true,
+                            "revision": rev,
+                            "canUndo": can_undo,
+                            "canRedo": can_redo
+                        }),
+                    )),
+                    Err(e) => responder.respond(json_response(
+                        StatusCode::OK,
+                        &json!({ "ok": false, "error": e }),
+                    )),
+                });
+            }
+            Err(e) => responder.respond(json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({ "ok": false, "error": e.to_string() }),
+            )),
+        },
+        "/__rust_api__/acrobat/getWorkingPdf" => {
+            match serde_json::from_slice::<PathPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || match ws.get_working_bytes(&p.file_path) {
+                        Ok(bytes) => {
+                            let sz = bytes.len() as u64;
+                            responder.respond(binary_response(
+                                StatusCode::OK,
+                                bytes,
+                                "working.pdf",
+                                sz,
+                            ));
+                        }
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::BAD_REQUEST,
+                            &json!({ "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/listFonts" => {
+            thread::spawn(move || {
+                let catalog = font_shaper::list_font_catalog();
+                responder.respond(json_response(StatusCode::OK, &catalog));
+            });
+        }
+        "/__rust_api__/app/openNewWindow" => {
+            let file_path = serde_json::from_slice::<PathPayload>(&body)
+                .map(|p| p.file_path)
+                .unwrap_or_default();
+            let mut ok = false;
+            if let Ok(exe) = std::env::current_exe() {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("--new-window");
+                if !file_path.trim().is_empty() {
+                    cmd.arg(file_path.trim());
+                }
+                ok = cmd.spawn().is_ok();
+            }
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
         }
         "/__rust_api__/diag" => {
             let msg = String::from_utf8_lossy(&body).to_string();
@@ -1149,7 +1643,9 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         ensure_webview2_loader_loaded(&user_data_dir);
+        ensure_pdfium_dll_present(&user_data_dir);
     }
+    let pdf_workspace = PdfWorkspaceEngine::new();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -1181,6 +1677,7 @@ fn main() {
     let store_for_protocol = Arc::clone(&store);
     let pending_boot_for_protocol = Arc::clone(&pending_boot_open_files);
     let ready_for_protocol = Arc::clone(&webview_ready);
+    let workspace_for_protocol = pdf_workspace.clone();
     let proxy_for_ipc = proxy.clone();
     let proxy_for_drop = proxy.clone();
     let proxy_for_close = proxy.clone();
@@ -1195,10 +1692,15 @@ fn main() {
         }
     }
 
-    let webview = WebViewBuilder::with_web_context(&mut web_context)
+    let builder = WebViewBuilder::with_web_context(&mut web_context)
         .with_background_color((37, 37, 43, 255))
         .with_hotkeys_zoom(true)
-        .with_initialization_script(&init_script)
+        .with_initialization_script(&init_script);
+    #[cfg(not(debug_assertions))]
+    let builder = builder.with_devtools(false);
+    #[cfg(target_os = "windows")]
+    let builder = builder.with_browser_accelerator_keys(false);
+    let webview = builder
         .with_drag_drop_handler(move |event| {
             match event {
                 wry::DragDropEvent::Enter { paths, .. } => {
@@ -1246,6 +1748,7 @@ fn main() {
                     Arc::clone(&store_for_protocol),
                     Arc::clone(&pending_boot_for_protocol),
                     Arc::clone(&ready_for_protocol),
+                    workspace_for_protocol.clone(),
                     responder,
                 );
                 return;
