@@ -3,6 +3,7 @@
 mod dialogs;
 mod font_shaper;
 mod installer;
+mod pdf_annots;
 mod pdf_engine;
 mod pdf_layout;
 mod pdf_objects;
@@ -32,7 +33,7 @@ use wry::WebViewBuilderExtWindows;
 
 use crate::pdf_layout::PdfWorkspaceEngine;
 use crate::pdf_objects::{commit_edit_text_block, commit_shape_operation, EditTextCommitRequest, ShapeCommitRequest};
-use crate::store::{AppDataStore, FileState, PartialAppSettings, RecentFile};
+use crate::store::{AppDataStore, FileState, PartialAppSettings, RecentFile, SessionState};
 
 #[derive(RustEmbed)]
 #[folder = "src-rust/assets/"]
@@ -159,8 +160,8 @@ mod win32_frame {
                 &corner_pref as *const i32 as *const c_void,
                 4,
             );
-            // #25252b in BGR COLORREF so non-client/background never flashes white or classic gray
-            let dark_brush = CreateSolidBrush(0x002B2525);
+            // #1e1e1e in BGR COLORREF so non-client/background never flashes white or classic gray
+            let dark_brush = CreateSolidBrush(0x001E1E1E);
             if dark_brush != 0 {
                 let _ = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, dark_brush);
             }
@@ -203,11 +204,13 @@ mod win32_frame {
 
 #[derive(Debug, Clone)]
 enum UserEvent {
+    ShowMainWindow,
     Minimize,
     Maximize,
     Unmaximize,
     Close,
-    ConfirmClose(bool),
+    ClosePromptActive,
+    ConfirmClose(bool, Option<SessionState>),
     CloseTimeoutFallback,
     ToggleFullScreen,
     SetFullScreen(bool),
@@ -269,6 +272,7 @@ struct IpcWindowCommand {
     cmd: String,
     value: Option<bool>,
     proceed: Option<bool>,
+    session: Option<SessionState>,
 }
 
 #[derive(Deserialize)]
@@ -363,6 +367,116 @@ struct AcrobatShapeCommitPayload {
     file_path: String,
     #[serde(flatten)]
     req: ShapeCommitRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatImageCommitPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: pdf_objects::ImageCommitRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatAnnotationCommitPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: pdf_annots::CommitAnnotationRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatFormFieldPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: pdf_annots::UpdateFormFieldRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatRotatePagesPayload {
+    file_path: String,
+    pages: Vec<usize>,
+    delta_deg: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatRedactPayload {
+    file_path: String,
+    page: usize,
+    rects_vp: Vec<[f32; 4]>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatDocPropsPayload {
+    file_path: String,
+    #[serde(flatten)]
+    props: pdf_annots::DocPropertiesDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatBookmarksPayload {
+    file_path: String,
+    bookmarks: Vec<pdf_annots::BookmarkDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatPageLabelsPayload {
+    file_path: String,
+    style: String,
+    prefix: String,
+    start_num: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatCropPagesPayload {
+    file_path: String,
+    pages: Vec<usize>,
+    margins: [f32; 4],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatPageOpPayload {
+    file_path: String,
+    #[serde(flatten)]
+    req: pdf_annots::PageOpsRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatExtractPagesPayload {
+    file_path: String,
+    pages: Vec<usize>,
+    output_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatCombinePayload {
+    paths: Vec<String>,
+    output_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcrobatSaveVerifiedPayload {
+    file_path: String,
+    target_path: Option<String>,
+    #[serde(default)]
+    incremental: bool,
+    #[serde(default = "default_compact_save")]
+    compact: bool,
+}
+
+fn default_compact_save() -> bool {
+    true
 }
 
 fn guess_mime_type(path: &str) -> &'static str {
@@ -687,6 +801,15 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     saveFileState: async function (filePath, state) {
       await apiPostJson('/store/saveFileState', { filePath: filePath, state: state });
     },
+    saveSession: async function (session) {
+      await apiPostJson('/store/saveSession', session || {});
+    },
+    getSession: async function () {
+      return await apiPostJson('/store/getSession', {});
+    },
+    notifyWindowReady: function () {
+      sendWindowCmd('windowReady');
+    },
     listSignatures: async function () {
       return await apiPostJson('/signatures/list', {});
     },
@@ -703,7 +826,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.2.0';
+      return '1.2.1';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -883,6 +1006,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         }));
         e.preventDefault();
         e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
       }
     },
     { capture: true }
@@ -896,6 +1020,23 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     shapeReflowBlock: function (p) { return window.electronAPI.shapeReflowBlock(p); },
     commitEditText: function (p) { return window.electronAPI.commitEditText(p); },
     commitShapeEdit: function (p) { return window.electronAPI.commitShapeEdit(p); },
+    commitImageEdit: function (p) { return apiPostJson('/acrobat/commitImage', p); },
+    getAnnotations: function (fp, page) { return apiPostJson('/acrobat/getAnnotations', { filePath: fp, page: page }); },
+    commitAnnotation: function (p) { return apiPostJson('/acrobat/commitAnnotation', p); },
+    updateFormField: function (p) { return apiPostJson('/acrobat/updateFormField', p); },
+    rotatePages: function (fp, pages, deltaDeg) { return apiPostJson('/acrobat/rotatePages', { filePath: fp, pages: pages, deltaDeg: deltaDeg }); },
+    applyRedaction: function (fp, page, rectsVp) { return apiPostJson('/acrobat/applyRedaction', { filePath: fp, page: page, rectsVp: rectsVp }); },
+    getDocProperties: function (fp) { return apiPostJson('/acrobat/getDocProperties', { filePath: fp }); },
+    setDocProperties: function (p) { return apiPostJson('/acrobat/setDocProperties', p); },
+    listBookmarks: function (fp) { return apiPostJson('/acrobat/listBookmarks', { filePath: fp }); },
+    writeBookmarks: function (fp, bms) { return apiPostJson('/acrobat/writeBookmarks', { filePath: fp, bookmarks: bms }); },
+    setPageLabels: function (p) { return apiPostJson('/acrobat/setPageLabels', p); },
+    cropPages: function (p) { return apiPostJson('/acrobat/cropPages', p); },
+    pageOp: function (p) { return apiPostJson('/acrobat/pageOp', p); },
+    extractPages: function (p) { return apiPostJson('/acrobat/extractPages', p); },
+    combinePdfs: function (p) { return apiPostJson('/acrobat/combinePdfs', p); },
+    saveVerified: function (p) { return apiPostJson('/acrobat/saveVerified', p); },
+    verifyPdf: function (fp) { return apiPostJson('/acrobat/verifyPdf', { filePath: fp }); },
     undo: function (fp) { return window.electronAPI.undoPdfEdit(fp); },
     redo: function (fp) { return window.electronAPI.redoPdfEdit(fp); },
     getWorkingPdf: function (fp) { return window.electronAPI.getWorkingPdf(fp); },
@@ -1122,6 +1263,16 @@ fn handle_api_request(
                 store.lock().unwrap().save_file_state(&p.file_path, p.state);
             }
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
+        "/__rust_api__/store/saveSession" => {
+            if let Ok(session) = serde_json::from_slice::<SessionState>(&body) {
+                store.lock().unwrap().save_session(&session);
+            }
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
+        "/__rust_api__/store/getSession" => {
+            let session = store.lock().unwrap().get_session();
+            responder.respond(json_response(StatusCode::OK, &session));
         }
         "/__rust_api__/signatures/list" => {
             let list = store.lock().unwrap().list_signatures();
@@ -1591,6 +1742,465 @@ fn handle_api_request(
                 responder.respond(json_response(StatusCode::OK, &catalog));
             });
         }
+        "/__rust_api__/acrobat/commitImage" => {
+            match serde_json::from_slice::<AcrobatImageCommitPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.req.page, |doc| {
+                            pdf_objects::commit_image_operation(doc, &p.req).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({
+                                    "ok": true,
+                                    "revision": rev,
+                                    "canUndo": can_undo,
+                                    "canRedo": can_redo
+                                }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/getAnnotations" => {
+            match serde_json::from_slice::<AcrobatPagePayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
+                            let lo = lopdf::Document::load_mem(&bytes)
+                                .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                            pdf_annots::extract_page_annotations(&lo, p.page)
+                        });
+                        match out {
+                            Ok(list) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": true, "annotations": list }))),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/commitAnnotation" => {
+            match serde_json::from_slice::<AcrobatAnnotationCommitPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.req.page, |doc| {
+                            pdf_annots::commit_annotation_op(doc, &p.req).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({
+                                    "ok": true,
+                                    "revision": rev,
+                                    "canUndo": can_undo,
+                                    "canRedo": can_redo
+                                }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/updateFormField" => {
+            match serde_json::from_slice::<AcrobatFormFieldPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.req.page, |doc| {
+                            pdf_annots::update_form_field(doc, &p.req).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/rotatePages" => {
+            match serde_json::from_slice::<AcrobatRotatePagesPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::rotate_pages(doc, &p.pages, p.delta_deg).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/applyRedaction" => {
+            match serde_json::from_slice::<AcrobatRedactPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_mutation(&p.file_path, p.page, |doc| {
+                            pdf_annots::apply_redactions(doc, p.page, &p.rects_vp).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/getDocProperties" => {
+            match serde_json::from_slice::<PathPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
+                            let lo = lopdf::Document::load_mem(&bytes)
+                                .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                            Ok(pdf_annots::get_doc_properties(&lo))
+                        });
+                        match out {
+                            Ok(props) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": true, "properties": props }))),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/setDocProperties" => {
+            match serde_json::from_slice::<AcrobatDocPropsPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::set_doc_properties(doc, &p.props).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/listBookmarks" => {
+            match serde_json::from_slice::<PathPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
+                            let lo = lopdf::Document::load_mem(&bytes)
+                                .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                            Ok(pdf_annots::list_bookmarks(&lo))
+                        });
+                        match out {
+                            Ok(bms) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": true, "bookmarks": bms }))),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/writeBookmarks" => {
+            match serde_json::from_slice::<AcrobatBookmarksPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::write_bookmarks(doc, &p.bookmarks).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/setPageLabels" => {
+            match serde_json::from_slice::<AcrobatPageLabelsPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::set_page_labels(doc, &p.style, &p.prefix, p.start_num)
+                                .map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/cropPages" => {
+            match serde_json::from_slice::<AcrobatCropPagesPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::crop_pages_real(doc, &p.pages, p.margins).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/pageOp" => {
+            match serde_json::from_slice::<AcrobatPageOpPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ws.push_doc_mutation(&p.file_path, |doc| {
+                            pdf_annots::apply_page_operation(doc, &p.req).map(|_| None)
+                        }) {
+                            Ok((rev, can_undo, can_redo, _)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "canUndo": can_undo, "canRedo": can_redo }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/extractPages" => {
+            match serde_json::from_slice::<AcrobatExtractPagesPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
+                            let lo = lopdf::Document::load_mem(&bytes)
+                                .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                            let extracted = pdf_annots::extract_pages_to_bytes(&lo, &p.pages)?;
+                            pdf_annots::save_pdf_verified(&extracted, None, &p.output_path, false, true)?;
+                            Ok(())
+                        });
+                        match out {
+                            Ok(()) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": true }))),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/combinePdfs" => {
+            match serde_json::from_slice::<AcrobatCombinePayload>(&body) {
+                Ok(p) => {
+                    thread::spawn(move || {
+                        let res = pdf_annots::combine_pdfs_to_bytes(&p.paths).and_then(|bytes| {
+                            pdf_annots::save_pdf_verified(&bytes, None, &p.output_path, false, true)?;
+                            Ok(())
+                        });
+                        match res {
+                            Ok(()) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": true }))),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/saveVerified" => {
+            match serde_json::from_slice::<AcrobatSaveVerifiedPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let target = p.target_path.unwrap_or_else(|| p.file_path.clone());
+                        match ws.save_verified_to_disk(&p.file_path, &target, p.incremental, p.compact) {
+                            Ok((rev, used_inc)) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": true, "revision": rev, "incremental": used_inc, "filePath": target }),
+                            )),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/acrobat/verifyPdf" => {
+            match serde_json::from_slice::<PathPayload>(&body) {
+                Ok(p) => {
+                    thread::spawn(move || {
+                        let out = (|| -> Result<serde_json::Value, String> {
+                            let bytes = fs::read(&p.file_path)
+                                .map_err(|e| format!("Failed reading '{}': {}", p.file_path, e))?;
+                            let lo = lopdf::Document::load_mem(&bytes)
+                                .map_err(|e| format!("lopdf parse failed: {}", e))?;
+                            let pdfium = pdf_layout::get_pdfium()?;
+                            let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+                            let pdoc = guard
+                                .load_pdf_from_byte_slice(&bytes, None)
+                                .map_err(|e| format!("PDFium load failed: {:?}", e))?;
+                            let mut rotations = Vec::new();
+                            let mut annot_counts = Vec::new();
+                            let mut text_samples = Vec::new();
+                            for (idx, pg) in pdoc.pages().iter().enumerate() {
+                                let lo_pages = lo.get_pages();
+                                let rot = lo_pages
+                                    .get(&((idx + 1) as u32))
+                                    .map(|pid| pdf_objects::get_page_transform(&lo, *pid).rotation)
+                                    .unwrap_or(0);
+                                rotations.push(rot);
+                                let anns = pdf_annots::extract_page_annotations(&lo, idx + 1)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0);
+                                annot_counts.push(anns);
+                                let txt = pg
+                                    .text()
+                                    .map(|t| {
+                                        t.chars()
+                                            .iter()
+                                            .filter_map(|c| c.unicode_char())
+                                            .take(120)
+                                            .collect::<String>()
+                                    })
+                                    .unwrap_or_default();
+                                text_samples.push(txt);
+                            }
+                            let props = pdf_annots::get_doc_properties(&lo);
+                            let bookmarks = pdf_annots::list_bookmarks(&lo);
+                            Ok(json!({
+                                "ok": true,
+                                "pageCount": pdoc.pages().len(),
+                                "rotations": rotations,
+                                "annotCounts": annot_counts,
+                                "textSamples": text_samples,
+                                "properties": props,
+                                "bookmarkCount": bookmarks.len()
+                            }))
+                        })();
+                        match out {
+                            Ok(v) => responder.respond(json_response(StatusCode::OK, &v)),
+                            Err(e) => responder.respond(json_response(StatusCode::OK, &json!({ "ok": false, "error": e }))),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
         "/__rust_api__/app/openNewWindow" => {
             let file_path = serde_json::from_slice::<PathPayload>(&body)
                 .map(|p| p.file_path)
@@ -1663,7 +2273,7 @@ fn main() {
         .with_min_inner_size(LogicalSize::new(920.0, 600.0))
         .with_maximized(true)
         .with_decorations(false)
-        .with_visible(true)
+        .with_visible(false)
         .build(&event_loop)
         .expect("Failed to create native Rust window");
 
@@ -1693,7 +2303,7 @@ fn main() {
     }
 
     let builder = WebViewBuilder::with_web_context(&mut web_context)
-        .with_background_color((37, 37, 43, 255))
+        .with_background_color((30, 30, 30, 255))
         .with_hotkeys_zoom(true)
         .with_initialization_script(&init_script);
     #[cfg(not(debug_assertions))]
@@ -1790,6 +2400,9 @@ fn main() {
             let body = req.body();
             if let Ok(parsed) = serde_json::from_str::<IpcWindowCommand>(body) {
                 match parsed.cmd.as_str() {
+                    "windowReady" => {
+                        let _ = proxy_for_ipc.send_event(UserEvent::ShowMainWindow);
+                    }
                     "minimize" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::Minimize);
                     }
@@ -1802,9 +2415,12 @@ fn main() {
                     "close" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::Close);
                     }
+                    "closePromptActive" => {
+                        let _ = proxy_for_ipc.send_event(UserEvent::ClosePromptActive);
+                    }
                     "confirmClose" => {
                         let proceed = parsed.proceed.or(parsed.value).unwrap_or(false);
-                        let _ = proxy_for_ipc.send_event(UserEvent::ConfirmClose(proceed));
+                        let _ = proxy_for_ipc.send_event(UserEvent::ConfirmClose(proceed, parsed.session));
                     }
                     "toggleFullScreen" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::ToggleFullScreen);
@@ -1834,6 +2450,15 @@ fn main() {
     let mut last_fullscreen = window.fullscreen().is_some();
     let mut was_maximized_before_fs = true;
     let mut close_pending = false;
+    let mut awaiting_user_close_prompt = false;
+    let mut window_shown = false;
+
+    // Fallback safety timer: guarantee the window becomes visible quickly even if WebView2 init is slow
+    let proxy_for_show = proxy.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        let _ = proxy_for_show.send_event(UserEvent::ShowMainWindow);
+    });
 
     let sync_webview_bounds = |win: &tao::window::Window, wv: &wry::WebView| {
         let size = win.inner_size();
@@ -1843,6 +2468,8 @@ fn main() {
         });
         let _ = wv.zoom(1.0);
     };
+
+    let store_for_close = Arc::clone(&store);
 
     event_loop.run(move |event, _, control_flow| {
         let _keep_instance_guard = &instance_guard;
@@ -1855,12 +2482,13 @@ fn main() {
             } => {
                 if !close_pending {
                     close_pending = true;
+                    awaiting_user_close_prompt = false;
                     let _ = webview.evaluate_script(
                         "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
                     );
                     let p_close = proxy_for_close.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(2500));
+                        std::thread::sleep(std::time::Duration::from_millis(400));
                         let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
                     });
                 }
@@ -1890,6 +2518,15 @@ fn main() {
                 }
             }
             Event::UserEvent(user_event) => match user_event {
+                UserEvent::ShowMainWindow => {
+                    if !window_shown {
+                        window_shown = true;
+                        sync_webview_bounds(&window, &webview);
+                        window.set_visible(true);
+                        window.set_focus();
+                        let _ = webview.focus();
+                    }
+                }
                 UserEvent::Minimize => {
                     window.set_minimized(true);
                 }
@@ -1916,28 +2553,36 @@ fn main() {
                 UserEvent::Close => {
                     if !close_pending {
                         close_pending = true;
+                        awaiting_user_close_prompt = false;
                         let _ = webview.evaluate_script(
                             "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
                         );
                         let p_close = proxy_for_close.clone();
                         std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(2500));
+                            std::thread::sleep(std::time::Duration::from_millis(400));
                             let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
                         });
                     }
                 }
-                UserEvent::ConfirmClose(proceed) => {
+                UserEvent::ClosePromptActive => {
+                    awaiting_user_close_prompt = true;
+                }
+                UserEvent::ConfirmClose(proceed, session_opt) => {
                     if proceed {
+                        if let Some(session) = session_opt {
+                            store_for_close.lock().unwrap().save_session(&session);
+                        }
                         #[cfg(target_os = "windows")]
                         win32_frame::hide_instantly_before_close(&window);
                         window.set_visible(false);
                         *control_flow = ControlFlow::Exit;
                     } else {
                         close_pending = false;
+                        awaiting_user_close_prompt = false;
                     }
                 }
                 UserEvent::CloseTimeoutFallback => {
-                    if close_pending && !webview_ready.load(Ordering::SeqCst) {
+                    if close_pending && !awaiting_user_close_prompt {
                         #[cfg(target_os = "windows")]
                         win32_frame::hide_instantly_before_close(&window);
                         window.set_visible(false);

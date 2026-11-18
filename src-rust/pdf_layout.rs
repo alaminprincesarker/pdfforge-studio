@@ -163,6 +163,7 @@ pub fn get_pdfium() -> Result<Arc<Mutex<Pdfium>>, String> {
 struct WorkingDocument {
     #[allow(dead_code)]
     canonical_key: String,
+    orig_disk_bytes: Option<Vec<u8>>,
     bytes: Vec<u8>,
     revision: u64,
     undo_stack: Vec<Vec<u8>>,
@@ -204,6 +205,7 @@ impl PdfWorkspaceEngine {
         let mut guard = self.docs.lock().unwrap();
         let entry = guard.entry(key.clone()).or_insert_with(|| WorkingDocument {
             canonical_key: file_path.to_string(),
+            orig_disk_bytes: Some(disk_bytes.clone()),
             bytes: disk_bytes.clone(),
             revision: 1,
             undo_stack: Vec::new(),
@@ -224,6 +226,7 @@ impl PdfWorkspaceEngine {
             key,
             WorkingDocument {
                 canonical_key: file_path.to_string(),
+                orig_disk_bytes: Some(disk_bytes.clone()),
                 bytes: disk_bytes,
                 revision: 1,
                 undo_stack: Vec::new(),
@@ -242,6 +245,7 @@ impl PdfWorkspaceEngine {
             key,
             WorkingDocument {
                 canonical_key: file_path.to_string(),
+                orig_disk_bytes: Some(bytes.clone()),
                 bytes,
                 revision: 1,
                 undo_stack: Vec::new(),
@@ -250,6 +254,101 @@ impl PdfWorkspaceEngine {
                 objects_cache: HashMap::new(),
             },
         );
+    }
+
+    /// Document-wide mutation (rotate pages, insert/delete/reorder pages, metadata, outlines, labels):
+    /// clears all page layout & object caches and pushes undo history.
+    pub fn push_doc_mutation<F>(
+        &self,
+        file_path: &str,
+        mutator: F,
+    ) -> Result<(u64, bool, bool, Option<String>), String>
+    where
+        F: FnOnce(&mut LoDocument) -> Result<Option<String>, String>,
+    {
+        let current_bytes = self.load_or_sync_from_disk(file_path)?;
+        let mut lo_doc = LoDocument::load_mem(&current_bytes)
+            .map_err(|e| format!("Failed parsing PDF in lopdf: {}", e))?;
+        let notice = mutator(&mut lo_doc)?;
+        let mut new_bytes = Vec::new();
+        lo_doc
+            .save_to(&mut new_bytes)
+            .map_err(|e| format!("Failed serializing mutated PDF: {}", e))?;
+
+        let key = Self::normalize_key(file_path);
+        let mut guard = self.docs.lock().unwrap();
+        let entry = guard.get_mut(&key).ok_or("Missing working document")?;
+        entry.undo_stack.push(entry.bytes.clone());
+        if entry.undo_stack.len() > 40 {
+            entry.undo_stack.remove(0);
+        }
+        entry.redo_stack.clear();
+        entry.bytes = new_bytes;
+        entry.revision += 1;
+        entry.layout_cache.clear();
+        entry.objects_cache.clear();
+        Ok((
+            entry.revision,
+            !entry.undo_stack.is_empty(),
+            !entry.redo_stack.is_empty(),
+            notice,
+        ))
+    }
+
+    /// Writes the authoritative working document atomically to `target_path`,
+    /// validates it with `pdfium-render` before replacing the target, and resets clean baseline.
+    pub fn save_verified_to_disk(
+        &self,
+        file_path: &str,
+        target_path: &str,
+        incremental: bool,
+        compact: bool,
+    ) -> Result<(u64, bool), String> {
+        let (working_bytes, orig_disk_bytes) = {
+            let _ = self.load_or_sync_from_disk(file_path)?;
+            let key = Self::normalize_key(file_path);
+            let guard = self.docs.lock().unwrap();
+            let entry = guard.get(&key).ok_or("Missing working document")?;
+            (entry.bytes.clone(), entry.orig_disk_bytes.clone())
+        };
+        let (saved_bytes, used_incremental) = crate::pdf_annots::save_pdf_verified(
+            &working_bytes,
+            orig_disk_bytes.as_deref(),
+            target_path,
+            incremental,
+            compact,
+        )?;
+        let dst_key = Self::normalize_key(target_path);
+        let src_key = Self::normalize_key(file_path);
+        let mut guard = self.docs.lock().unwrap();
+        let next_rev = if dst_key == src_key {
+            if let Some(entry) = guard.get_mut(&src_key) {
+                entry.orig_disk_bytes = Some(saved_bytes.clone());
+                entry.bytes = saved_bytes;
+                entry.revision += 1;
+                entry.layout_cache.clear();
+                entry.objects_cache.clear();
+                entry.revision
+            } else {
+                1
+            }
+        } else {
+            guard.insert(
+                dst_key,
+                WorkingDocument {
+                    canonical_key: target_path.to_string(),
+                    orig_disk_bytes: Some(saved_bytes.clone()),
+                    bytes: saved_bytes,
+                    revision: 1,
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
+                    layout_cache: HashMap::new(),
+                    objects_cache: HashMap::new(),
+                },
+            );
+            1
+        };
+        Ok((next_rev, used_incremental))
     }
 
     pub fn push_mutation<F>(
@@ -743,7 +842,7 @@ pub fn extract_page_layout_from_bytes(
     }
 
     let pdfium = get_pdfium()?;
-    let pdfium_guard = pdfium.lock().unwrap();
+    let pdfium_guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
     let doc = pdfium_guard
         .load_pdf_from_byte_slice(bytes, None)
         .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?;

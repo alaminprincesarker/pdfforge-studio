@@ -787,3 +787,436 @@ fn test_multipage_layout_and_objects_all_pages() {
     }
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn test_real_annotations_ink_shapes_and_cropbox_rotated_reopen() {
+    use crate::pdf_annots::{
+        commit_annotation_op, extract_page_annotations, rotate_pages, save_pdf_verified,
+        CommitAnnotationRequest,
+    };
+    use crate::pdf_layout::get_pdfium;
+
+    // Build a PDF with CropBox offset [36, 48, 576, 756] and text
+    let mut ops = Vec::new();
+    ops.extend(text_op(80.0, 620.0, 14.0, [0.0, 0.0, 0.0], "CropBox Annotated Text Line"));
+    let base_bytes = build_single_page_pdf([0, 0, 612, 792], 0, ops, vec![], false);
+    let mut doc = Document::load_mem(&base_bytes).unwrap();
+    let p1 = *doc.get_pages().get(&1).unwrap();
+    if let Ok(Object::Dictionary(ref mut pd)) = doc.get_object_mut(p1) {
+        pd.set(
+            "CropBox",
+            Object::Array(vec![36_i64.into(), 48_i64.into(), 576_i64.into(), 756_i64.into()]),
+        );
+    }
+
+    // 1. Add Highlighter Ink stroke (Multiply + opacity 0.4)
+    commit_annotation_op(
+        &mut doc,
+        &CommitAnnotationRequest {
+            page: 1,
+            action: "add".into(),
+            id: "ink-hl-1".into(),
+            kind: "ink".into(),
+            bbox_vp: [60.0, 80.0, 180.0, 30.0],
+            color: Some("#facc15".into()),
+            fill_color: None,
+            opacity: Some(0.4),
+            stroke_width: Some(14.0),
+            is_highlighter: Some(true),
+            contents: Some("Highlighter Ink".into()),
+            author: Some("Tester".into()),
+            points_vp: Some(vec![vec![[65.0, 95.0], [120.0, 88.0], [180.0, 102.0], [235.0, 95.0]]]),
+            rects_vp: None,
+            font_size: None,
+            font_family: None,
+            align: None,
+            stamp_name: None,
+            image_data_url: None,
+            rgba_base64: None,
+            pixel_width: None,
+            pixel_height: None,
+            url: None,
+            target_page: None,
+        },
+    )
+    .expect("commit ink");
+
+    // 2. Add Highlight, Sticky Note + Popup, FreeText, Square, Circle, Arrow, Polygon, Cloud, Stamp, Link
+    for (id, kind) in [
+        ("hl-1", "highlight"),
+        ("ul-1", "underline"),
+        ("st-1", "strikethrough"),
+        ("note-1", "note"),
+        ("ft-1", "freetext"),
+        ("sq-1", "square"),
+        ("ci-1", "circle"),
+        ("ar-1", "arrow"),
+        ("pg-1", "polygon"),
+        ("cl-1", "cloud"),
+        ("sp-1", "stamp"),
+        ("lk-1", "link"),
+    ] {
+        commit_annotation_op(
+            &mut doc,
+            &CommitAnnotationRequest {
+                page: 1,
+                action: "add".into(),
+                id: id.into(),
+                kind: kind.into(),
+                bbox_vp: [70.0, 140.0, 120.0, 28.0],
+                color: Some("#2f6bff".into()),
+                fill_color: Some("#38bdf8".into()),
+                opacity: Some(0.8),
+                stroke_width: Some(2.0),
+                is_highlighter: Some(kind == "highlight"),
+                contents: Some(format!("Content {}", kind)),
+                author: Some("Tester".into()),
+                points_vp: Some(vec![vec![[70.0, 140.0], [150.0, 140.0], [120.0, 180.0]]]),
+                rects_vp: Some(vec![[70.0, 140.0, 120.0, 16.0]]),
+                font_size: Some(12.0),
+                font_family: Some("Helvetica".into()),
+                align: Some("left".into()),
+                stamp_name: Some("APPROVED".into()),
+                image_data_url: None,
+                rgba_base64: None,
+                pixel_width: None,
+                pixel_height: None,
+                url: if kind == "link" { Some("https://example.org".into()) } else { None },
+                target_page: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("failed {}: {}", kind, e));
+    }
+
+    // 3. Rotate real /Rotate to 90 degrees
+    rotate_pages(&mut doc, &[1], 90).expect("rotate_pages");
+
+    let mut working_bytes = Vec::new();
+    doc.save_to(&mut working_bytes).unwrap();
+
+    let out_path = temp_pdf_path("test_crop_rotated_annots_saved.pdf");
+    save_pdf_verified(
+        &working_bytes,
+        Some(&base_bytes),
+        out_path.to_str().unwrap(),
+        false,
+        true,
+    )
+    .expect("save_pdf_verified compact");
+
+    // Reopen saved file independently using both lopdf & pdfium-render!
+    let saved_bytes = std::fs::read(&out_path).unwrap();
+    let reopened = Document::load_mem(&saved_bytes).unwrap();
+    let rp1 = *reopened.get_pages().get(&1).unwrap();
+    let r_rot = reopened.get_dictionary(rp1).unwrap().get(b"Rotate").unwrap().as_i64().unwrap();
+    assert_eq!(r_rot, 90, "/Rotate must persist as 90 in saved PDF");
+
+    let anns = extract_page_annotations(&reopened, 1).unwrap();
+    assert!(
+        anns.len() >= 13,
+        "All 13 annotation objects (+Popup) must survive save, got {}",
+        anns.len()
+    );
+    let ink = anns.iter().find(|a| a.subtype == "Ink").expect("Ink annotation");
+    assert!(ink.is_highlighter, "Ink highlighter flag / opacity preserved");
+
+    // Verify pdfium-render opens & counts annotations + extracts all glyphs across CropBox + /Rotate
+    let pdfium = get_pdfium().unwrap();
+    let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+    let pdoc = guard.load_pdf_from_byte_slice(&saved_bytes, None).unwrap();
+    assert_eq!(pdoc.pages().len(), 1);
+    let p_page = pdoc.pages().get(0).unwrap();
+    let p_txt: String = p_page
+        .text()
+        .unwrap()
+        .chars()
+        .iter()
+        .filter_map(|c| c.unicode_char())
+        .collect();
+    assert!(
+        p_txt.contains("CropBox Annotated Text Line"),
+        "Unexpected extracted text: {:?}",
+        p_txt
+    );
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[test]
+fn test_true_redaction_image_xobject_and_acroform() {
+    use crate::pdf_annots::{
+        apply_redactions, extract_page_annotations, save_pdf_verified, update_form_field,
+        UpdateFormFieldRequest,
+    };
+    use crate::pdf_layout::get_pdfium;
+    use crate::pdf_objects::{commit_image_operation, ImageCommitRequest};
+
+    // Build PDF with two distinct text lines (TOP_PUBLIC and SECRET_SSN_12345) + AcroForm Tx & Btn Widgets
+    let mut ops = Vec::new();
+    ops.extend(text_op(60.0, 700.0, 14.0, [0.0, 0.0, 0.0], "PUBLIC_HEADER_VISIBLE"));
+    ops.extend(text_op(60.0, 640.0, 14.0, [0.0, 0.0, 0.0], "SECRET_SSN_998877"));
+    let base_bytes = build_single_page_pdf([0, 0, 612, 792], 0, ops, vec![], false);
+    let mut doc = Document::load_mem(&base_bytes).unwrap();
+    let page_id = *doc.get_pages().get(&1).unwrap();
+
+    // Add AcroForm Widgets
+    let tx_id = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Tx",
+        "T" => Object::string_literal("FullName"),
+        "V" => Object::string_literal(""),
+        "Rect" => vec![60_i64.into(), 500_i64.into(), 260_i64.into(), 524_i64.into()],
+    });
+    let btn_id = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Btn",
+        "T" => Object::string_literal("AgreeBox"),
+        "V" => Object::Name(b"Off".to_vec()),
+        "AS" => Object::Name(b"Off".to_vec()),
+        "Rect" => vec![60_i64.into(), 460_i64.into(), 78_i64.into(), 478_i64.into()],
+    });
+    if let Ok(Object::Dictionary(ref mut pd)) = doc.get_object_mut(page_id) {
+        pd.set("Annots", Object::Array(vec![Object::Reference(tx_id), Object::Reference(btn_id)]));
+    }
+
+    // Add real RGBA Image XObject via commit_image_operation, then move, resize, rotate, crop it!
+    let rgba = [255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let rgba_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &rgba);
+    commit_image_operation(
+        &mut doc,
+        &ImageCommitRequest {
+            page: 1,
+            action: "add".into(),
+            op_index: None,
+            resource_name: None,
+            bbox_vp: [300.0, 100.0, 120.0, 80.0],
+            crop_bbox_vp: None,
+            rotation_deg: Some(0.0),
+            image_data_url: None,
+            rgba_base64: Some(rgba_b64),
+            pixel_width: Some(2),
+            pixel_height: Some(2),
+        },
+    )
+    .expect("add image");
+
+    let objs = parse_page_objects(&doc, 0).unwrap();
+    assert_eq!(objs.image_objects.len(), 1);
+    let img_obj = &objs.image_objects[0];
+    commit_image_operation(
+        &mut doc,
+        &ImageCommitRequest {
+            page: 1,
+            action: "crop".into(),
+            op_index: Some(img_obj.op_index),
+            resource_name: Some(img_obj.name.clone()),
+            bbox_vp: [310.0, 110.0, 100.0, 60.0],
+            crop_bbox_vp: Some([320.0, 120.0, 70.0, 40.0]),
+            rotation_deg: Some(15.0),
+            image_data_url: None,
+            rgba_base64: None,
+            pixel_width: None,
+            pixel_height: None,
+        },
+    )
+    .expect("crop + rotate image");
+
+    // Update AcroForm fields
+    update_form_field(
+        &mut doc,
+        &UpdateFormFieldRequest {
+            page: 1,
+            field_name: "FullName".into(),
+            value: "Alice Engineer".into(),
+        },
+    )
+    .expect("update Tx form field");
+    update_form_field(
+        &mut doc,
+        &UpdateFormFieldRequest {
+            page: 1,
+            field_name: "AgreeBox".into(),
+            value: "Yes".into(),
+        },
+    )
+    .expect("update Btn form field");
+
+    // Find bbox of SECRET_SSN_998877 via PDFium layout and permanently redact it!
+    let mut tmp_bytes = Vec::new();
+    doc.save_to(&mut tmp_bytes).unwrap();
+    let lay = extract_page_layout_from_bytes(&tmp_bytes, 1, None).unwrap();
+    let secret_blk = lay
+        .blocks
+        .iter()
+        .find(|b| b.text.contains("SECRET_SSN_998877"))
+        .expect("find secret block");
+    apply_redactions(&mut doc, 1, &[secret_blk.bbox]).expect("apply_redactions");
+
+    let mut redacted_bytes = Vec::new();
+    doc.save_to(&mut redacted_bytes).unwrap();
+    let save_path = temp_pdf_path("test_redacted_form_img.pdf");
+    save_pdf_verified(
+        &redacted_bytes,
+        Some(&base_bytes),
+        save_path.to_str().unwrap(),
+        false,
+        true,
+    )
+    .unwrap();
+
+    // Verify reopened PDF via PDFium & lopdf
+    let final_bytes = std::fs::read(&save_path).unwrap();
+    let final_lo = Document::load_mem(&final_bytes).unwrap();
+    let anns = extract_page_annotations(&final_lo, 1).unwrap();
+    let tx_w = anns.iter().find(|a| a.field_name == "FullName").unwrap();
+    assert_eq!(tx_w.field_value, "Alice Engineer");
+    let btn_w = anns.iter().find(|a| a.field_name == "AgreeBox").unwrap();
+    assert_eq!(btn_w.field_value, "Yes");
+
+    let pdfium = get_pdfium().unwrap();
+    let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+    let pdoc = guard.load_pdf_from_byte_slice(&final_bytes, None).unwrap();
+    let all_text = pdoc.pages().get(0).unwrap().text().unwrap().all();
+    assert!(all_text.contains("PUBLIC_HEADER_VISIBLE"));
+    assert!(
+        !all_text.contains("SECRET_SSN_998877"),
+        "True redaction MUST physically remove secret text from content stream! Got: {}",
+        all_text
+    );
+    let _ = std::fs::remove_file(&save_path);
+}
+
+#[test]
+fn test_metadata_outlines_pagelabels_combine_extract_and_scanned() {
+    use crate::pdf_annots::{
+        apply_page_operation, combine_pdfs_to_bytes, crop_pages_real, extract_pages_to_bytes,
+        get_doc_properties, list_bookmarks, save_pdf_verified, set_doc_properties, set_page_labels,
+        write_bookmarks, BookmarkDto, DocPropertiesDto, PageOpsRequest,
+    };
+    use crate::pdf_layout::get_pdfium;
+
+    // 1. Scanned PDF (single full-page Image XObject, 0 text objects) + vector ink/freetext overlay
+    let rgba = vec![240_u8; 4 * 4 * 4];
+    let img_stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 4,
+            "Height" => 4,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerComponent" => 8,
+        },
+        vec![240_u8; 4 * 4 * 3],
+    );
+    let scan_ops = vec![
+        Operation::new("q", vec![]),
+        Operation::new(
+            "cm",
+            vec![
+                612.0_f32.into(),
+                0.0_f32.into(),
+                0.0_f32.into(),
+                792.0_f32.into(),
+                0.0_f32.into(),
+                0.0_f32.into(),
+            ],
+        ),
+        Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+        Operation::new("Q", vec![]),
+    ];
+    let scanned_bytes =
+        build_single_page_pdf([0, 0, 612, 792], 0, scan_ops, vec![("Im0", img_stream)], false);
+    let scan_path = temp_pdf_path("test_scanned.pdf");
+    std::fs::write(&scan_path, &scanned_bytes).unwrap();
+    let _ = rgba;
+
+    let text_bytes = build_single_page_pdf(
+        [0, 0, 595, 842],
+        0,
+        text_op(60.0, 720.0, 12.0, [0.0, 0.0, 0.0], "Second A4 Document Page"),
+        vec![],
+        false,
+    );
+    let second_path = temp_pdf_path("test_second.pdf");
+    std::fs::write(&second_path, &text_bytes).unwrap();
+
+    // 2. Combine scanned Letter + A4 -> mixed-size multi-page PDF
+    let combined = combine_pdfs_to_bytes(&[
+        scan_path.to_str().unwrap().to_string(),
+        second_path.to_str().unwrap().to_string(),
+    ])
+    .expect("combine_pdfs_to_bytes");
+    let mut doc = Document::load_mem(&combined).unwrap();
+    assert_eq!(doc.get_pages().len(), 2);
+
+    // 3. Duplicate, insert blank, reorder, crop page 2
+    apply_page_operation(
+        &mut doc,
+        &PageOpsRequest {
+            action: "insert_blank".into(),
+            page: Some(2),
+            order: None,
+            source_file_path: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(doc.get_pages().len(), 3);
+    crop_pages_real(&mut doc, &[2], [18.0, 24.0, 18.0, 24.0]).unwrap();
+
+    // 4. Write Metadata (/Info + XMP), Bookmarks (/Outlines), and /PageLabels
+    set_doc_properties(
+        &mut doc,
+        &DocPropertiesDto {
+            title: "Acrobat Native Engine Verification".into(),
+            author: "PDFForge Studio".into(),
+            subject: "Real Structure Mutation".into(),
+            keywords: "pdf,rust,lopdf,pdfium".into(),
+            creator: "PDFForge Test Suite".into(),
+            producer: "PDFForge".into(),
+        },
+    )
+    .unwrap();
+    write_bookmarks(
+        &mut doc,
+        &[
+            BookmarkDto { title: "Scanned Cover".into(), page: 1 },
+            BookmarkDto { title: "A4 Section".into(), page: 2 },
+        ],
+    )
+    .unwrap();
+    set_page_labels(&mut doc, "roman_lower", "Sec-", 1).unwrap();
+
+    let mut mod_bytes = Vec::new();
+    doc.save_to(&mut mod_bytes).unwrap();
+    let final_path = temp_pdf_path("test_combined_meta_outlines.pdf");
+    save_pdf_verified(
+        &mod_bytes,
+        Some(&combined),
+        final_path.to_str().unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+
+    // Reopen via lopdf & PDFium and verify!
+    let saved = std::fs::read(&final_path).unwrap();
+    let lo = Document::load_mem(&saved).unwrap();
+    let props = get_doc_properties(&lo);
+    assert_eq!(props.title, "Acrobat Native Engine Verification");
+    assert_eq!(props.author, "PDFForge Studio");
+    let bms = list_bookmarks(&lo);
+    assert_eq!(bms.len(), 2);
+    assert_eq!(bms[1].title, "A4 Section");
+
+    let extracted = extract_pages_to_bytes(&lo, &[2]).unwrap();
+    let pdfium = get_pdfium().unwrap();
+    let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+    let pdoc = guard.load_pdf_from_byte_slice(&extracted, None).unwrap();
+    assert_eq!(pdoc.pages().len(), 1);
+    assert!(pdoc.pages().get(0).unwrap().text().unwrap().all().contains("Second A4 Document Page"));
+
+    let _ = std::fs::remove_file(&scan_path);
+    let _ = std::fs::remove_file(&second_path);
+    let _ = std::fs::remove_file(&final_path);
+}

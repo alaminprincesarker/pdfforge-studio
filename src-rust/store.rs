@@ -41,6 +41,8 @@ pub struct AppSettings {
     pub auto_install_updates: bool,
     #[serde(default = "default_true")]
     pub auto_fit_on_open: bool,
+    #[serde(default = "default_false")]
+    pub reduce_animations: bool,
 }
 
 impl Default for AppSettings {
@@ -53,6 +55,7 @@ impl Default for AppSettings {
             auto_check_updates: true,
             auto_install_updates: false,
             auto_fit_on_open: true,
+            reduce_animations: false,
         }
     }
 }
@@ -67,6 +70,36 @@ pub struct PartialAppSettings {
     pub auto_check_updates: Option<bool>,
     pub auto_install_updates: Option<bool>,
     pub auto_fit_on_open: Option<bool>,
+    pub reduce_animations: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTab {
+    pub file_path: String,
+    #[serde(default = "default_page_one")]
+    pub current_page: u32,
+    #[serde(default = "default_zoom_hundred")]
+    pub zoom: f64,
+    #[serde(default)]
+    pub rotation: i32,
+}
+
+fn default_page_one() -> u32 {
+    1
+}
+
+fn default_zoom_hundred() -> f64 {
+    100.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionState {
+    #[serde(default)]
+    pub active_file_path: Option<String>,
+    #[serde(default)]
+    pub tabs: Vec<SessionTab>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +187,9 @@ impl AppDataStore {
         }
         if let Some(auto_fit) = partial.auto_fit_on_open {
             current.auto_fit_on_open = auto_fit;
+        }
+        if let Some(reduce_anim) = partial.reduce_animations {
+            current.reduce_animations = reduce_anim;
         }
         if let Ok(json) = serde_json::to_string_pretty(&current) {
             let _ = fs::write(&self.settings_file, json);
@@ -255,6 +291,44 @@ impl AppDataStore {
         if let Ok(json) = serde_json::to_string_pretty(&map) {
             let _ = fs::write(&self.file_states_file, json);
         }
+    }
+
+    pub fn save_session(&self, session: &SessionState) {
+        let session_file = self.user_data_dir.join("session.json");
+        if let Ok(json) = serde_json::to_string_pretty(session) {
+            let _ = fs::write(session_file, json);
+        }
+        if !session.tabs.is_empty() {
+            let mut map: HashMap<String, FileState> = fs::read_to_string(&self.file_states_file)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            for tab in &session.tabs {
+                if !tab.file_path.trim().is_empty() {
+                    map.insert(
+                        tab.file_path.to_lowercase(),
+                        FileState {
+                            last_page: tab.current_page.max(1),
+                            last_zoom: tab.zoom,
+                            last_rotation: Some(tab.rotation),
+                        },
+                    );
+                }
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&map) {
+                let _ = fs::write(&self.file_states_file, json);
+            }
+        }
+    }
+
+    pub fn get_session(&self) -> SessionState {
+        let session_file = self.user_data_dir.join("session.json");
+        if let Ok(raw) = fs::read_to_string(session_file) {
+            if let Ok(parsed) = serde_json::from_str::<SessionState>(&raw) {
+                return parsed;
+            }
+        }
+        SessionState::default()
     }
 
     pub fn list_signatures(&self) -> Vec<SignatureItem> {

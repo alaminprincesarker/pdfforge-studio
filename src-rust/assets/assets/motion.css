@@ -1,0 +1,588 @@
+/* PDFForge Studio — Motion Design System Tokens & Shared GPU-Only Utilities (Ultra-Snappy) */
+
+:root {
+  --dur-instant: 50ms;
+  --dur-fast: 80ms;
+  --dur-normal: 110ms;
+  --dur-slow: 140ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Base dark surface to prevent white flash before paint */
+html, body {
+  background-color: #1e1e1e;
+}
+
+/* Splash Screen (Startup) */
+#pdfforge-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 2000000;
+  background-color: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: auto;
+  opacity: 1;
+}
+
+#pdfforge-splash.is-leaving {
+  animation: pfFadeOut 110ms var(--ease-in) forwards;
+  pointer-events: none;
+}
+
+.pf-splash-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  animation: pfSplashLogoIn 120ms var(--ease-out) both;
+}
+
+.pf-splash-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #2f6bff, #60a5fa);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: -0.04em;
+  box-shadow: 0 8px 22px rgba(47, 107, 255, 0.35);
+}
+
+.pf-splash-title {
+  color: #f3f4f6;
+  font-family: Inter, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pf-splash-track {
+  width: 140px;
+  height: 2px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.pf-splash-bar {
+  width: 45%;
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  animation: pfIndeterminate 700ms var(--ease-inout) infinite;
+}
+
+/* Keyframes (transform + opacity ONLY) */
+@keyframes pfFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pfFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes pfSplashLogoIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pfAppEnter {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes pfPopIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pfPopOut {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.97); }
+}
+
+@keyframes pfDropdownIn {
+  from { opacity: 0; transform: translate3d(0, -5px, 0) scale(0.98); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes pfDropdownOut {
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(0, -3px, 0) scale(0.98); }
+}
+
+@keyframes pfSlideDownIn {
+  from { opacity: 0; transform: translate3d(0, -6px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes pfSlideDownOut {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(0, -5px, 0); }
+}
+
+@keyframes pfSlideUpIn {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes pfSlideInLeft {
+  from { opacity: 0; transform: translate3d(-12px, 0, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes pfSlideOutLeft {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(-12px, 0, 0); }
+}
+
+@keyframes pfSlideInRight {
+  from { opacity: 0; transform: translate3d(12px, 0, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes pfSlideOutRight {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(12px, 0, 0); }
+}
+
+@keyframes pfTabIn {
+  from { opacity: 0; transform: scaleX(0.88); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+
+@keyframes pfTabOut {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.88); }
+}
+
+@keyframes pfShake {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  25% { transform: translate3d(-4px, 0, 0); }
+  50% { transform: translate3d(4px, 0, 0); }
+  75% { transform: translate3d(-2px, 0, 0); }
+}
+
+@keyframes pfMatchPulse {
+  0% { transform: scale(1); opacity: 0.75; }
+  45% { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes pfValueFlash {
+  0% { opacity: 0.6; transform: scale(0.97); }
+  50% { opacity: 1; transform: scale(1.03); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pfIndeterminate {
+  0% { transform: translate3d(-100%, 0, 0) scaleX(0.7); }
+  50% { transform: translate3d(90%, 0, 0) scaleX(1.15); }
+  100% { transform: translate3d(260%, 0, 0) scaleX(0.7); }
+}
+
+@keyframes pfShimmer {
+  0% { transform: translate3d(-100%, 0, 0); }
+  100% { transform: translate3d(100%, 0, 0); }
+}
+
+/* Shared Utility Classes */
+.anim-app-enter {
+  animation: pfAppEnter 160ms var(--ease-out) both;
+}
+
+.anim-fade-in {
+  animation: pfFadeIn var(--dur-normal) var(--ease-out) both;
+}
+
+.anim-fade-in-fast {
+  animation: pfFadeIn 65ms var(--ease-out) both;
+}
+
+.anim-fade-in-120 {
+  animation: pfFadeIn var(--dur-fast) var(--ease-out) both;
+}
+
+.anim-fade-in-150 {
+  animation: pfFadeIn 90ms var(--ease-out) both;
+}
+
+.anim-fade-out {
+  animation: pfFadeOut var(--dur-fast) var(--ease-in) forwards;
+}
+
+.anim-fade-out-100 {
+  animation: pfFadeOut 65ms var(--ease-in) forwards;
+}
+
+.anim-pop-in {
+  animation: pfPopIn var(--dur-normal) var(--ease-out) both;
+}
+
+.anim-pop-out {
+  animation: pfPopOut var(--dur-fast) var(--ease-in) forwards;
+}
+
+.anim-dropdown-in {
+  transform-origin: top center;
+  animation: pfDropdownIn 90ms var(--ease-out) both;
+}
+
+.anim-dropdown-out {
+  transform-origin: top center;
+  animation: pfDropdownOut 65ms var(--ease-in) forwards;
+}
+
+.anim-slide-down {
+  animation: pfSlideDownIn 95ms var(--ease-out) both;
+}
+
+.anim-slide-down-out {
+  animation: pfSlideDownOut 65ms var(--ease-in) forwards;
+}
+
+.anim-slide-in-left {
+  animation: pfSlideInLeft var(--dur-normal) var(--ease-out) both;
+}
+
+.anim-slide-out-left {
+  animation: pfSlideOutLeft var(--dur-fast) var(--ease-in) forwards;
+}
+
+.anim-slide-in-right {
+  animation: pfSlideInRight var(--dur-normal) var(--ease-out) both;
+}
+
+.anim-slide-out-right {
+  animation: pfSlideOutRight var(--dur-fast) var(--ease-in) forwards;
+}
+
+.anim-tab-in {
+  transform-origin: left center;
+  animation: pfTabIn 90ms var(--ease-out) both;
+}
+
+.anim-tab-out {
+  transform-origin: center center;
+  animation: pfTabOut 75ms var(--ease-in) forwards;
+}
+
+.anim-toast-in {
+  animation: pfSlideUpIn var(--dur-normal) var(--ease-out) both;
+}
+
+.anim-toast-out {
+  animation: pfFadeOut 90ms var(--ease-in) forwards;
+}
+
+.anim-shake {
+  animation: pfShake 140ms var(--ease-inout) both;
+}
+
+.anim-input-error {
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.85) !important;
+}
+
+.anim-flash-value {
+  animation: pfValueFlash 100ms var(--ease-out) both;
+}
+
+.anim-match-pulse {
+  animation: pfMatchPulse var(--dur-slow) var(--ease-out) both;
+}
+
+/* Home stagger items (capped at 6 items x 18ms) */
+.anim-stagger-item {
+  animation: pfFadeIn 90ms var(--ease-out) backwards;
+  animation-delay: calc(min(var(--stagger-idx, 0), 5) * 18ms);
+}
+
+/* Top thin indeterminate progress bar */
+.pf-progress-bar-track {
+  position: relative;
+  height: 2px;
+  width: 100%;
+  overflow: hidden;
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.pf-progress-bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, #3b82f6, #60a5fa, transparent);
+  animation: pfIndeterminate 800ms var(--ease-inout) infinite;
+}
+
+/* Page Skeleton Shimmer */
+.pf-page-skeleton {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background-color: #f3f4f6;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pf-page-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.55) 50%, transparent 100%);
+  animation: pfShimmer 900ms linear infinite;
+}
+
+/* Toolbar & Button Micro-interactions */
+button,
+[role="button"] {
+  transition:
+    background-color var(--dur-instant) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-inout),
+    transform var(--dur-instant) var(--ease-out);
+}
+
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* Keyboard-only focus ring */
+*:focus {
+  outline: none;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #60a5fa !important;
+  outline-offset: 1px !important;
+}
+
+/* Dropdown arrow rotation */
+.pf-chevron {
+  transition: transform 95ms var(--ease-out);
+}
+
+.pf-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* Active toggle tool small bottom indicator */
+.pf-tool-btn {
+  position: relative;
+}
+
+.pf-tool-btn::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 9999px;
+  background-color: #93c5fd;
+  opacity: 0;
+  transform: scaleX(0.35);
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  pointer-events: none;
+}
+
+.pf-tool-btn.is-active::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+/* Active tab sliding underline */
+.pf-tab-indicator {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 100px;
+  transform-origin: left center;
+  background-color: #60a5fa;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 25;
+  transition: transform 95ms var(--ease-out), opacity 80ms var(--ease-out);
+}
+
+/* Dragged tab lift */
+.pdfforge-tab-item.is-dragging {
+  transform: scale(1.03);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  z-index: 20;
+}
+
+/* Search textLayer match highlight pulse */
+.textLayer .highlight-match {
+  background-color: rgba(250, 204, 21, 0.42);
+  border-radius: 2px;
+}
+
+.textLayer .highlight-match.pf-match-pulse {
+  animation: pfMatchPulse var(--dur-slow) var(--ease-out);
+}
+
+/* Annotation / Edit overlay fade */
+.pf-annot-enter {
+  animation: pfFadeIn 90ms var(--ease-out) both;
+}
+
+.pf-annot-exit {
+  animation: pfFadeOut 65ms var(--ease-in) forwards;
+  pointer-events: none !important;
+}
+
+/* Custom delayed tooltip */
+#pdfforge-tooltip {
+  position: fixed;
+  z-index: 2000100;
+  pointer-events: none;
+  background: #18181f;
+  color: #f3f4f6;
+  border: 1px solid #3c3c4c;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  max-width: 280px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translate3d(0, 2px, 0);
+  transition: opacity 70ms var(--ease-out), transform 70ms var(--ease-out);
+}
+
+#pdfforge-tooltip.is-visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+/* Compact / Fullscreen toolbar reveal */
+.pf-toolbar-anim {
+  animation: pfSlideDownIn var(--dur-normal) var(--ease-out) both;
+}
+
+/* Close window transition */
+#root.pf-app-closing {
+  animation: pfPopOut var(--dur-fast) var(--ease-in) forwards;
+  pointer-events: none;
+}
+
+/* Reduced Motion (OS preference OR Settings toggle) */
+@media (prefers-reduced-motion: reduce) {
+  .anim-app-enter,
+  .anim-pop-in,
+  .anim-dropdown-in,
+  .anim-slide-down,
+  .anim-slide-in-left,
+  .anim-slide-in-right,
+  .anim-tab-in,
+  .anim-toast-in,
+  .anim-stagger-item,
+  .pf-toolbar-anim {
+    animation: pfFadeIn 50ms var(--ease-out) both !important;
+  }
+
+  .anim-pop-out,
+  .anim-dropdown-out,
+  .anim-slide-down-out,
+  .anim-slide-out-left,
+  .anim-slide-out-right,
+  .anim-tab-out,
+  .anim-toast-out,
+  #root.pf-app-closing {
+    animation: pfFadeOut 50ms var(--ease-in) forwards !important;
+  }
+
+  .anim-shake,
+  .anim-flash-value,
+  .anim-match-pulse {
+    animation: pfFadeIn 50ms var(--ease-out) both !important;
+  }
+
+  .pf-splash-bar,
+  .pf-progress-bar-fill,
+  .pf-page-skeleton::after {
+    animation: none !important;
+  }
+
+  button:active:not(:disabled),
+  [role="button"]:active:not(:disabled) {
+    transform: none !important;
+  }
+
+  .pf-tab-indicator,
+  .pf-chevron,
+  .pf-tool-btn::after {
+    transition: opacity 50ms linear !important;
+  }
+}
+
+body.reduce-animations .anim-app-enter,
+body.reduce-animations .anim-pop-in,
+body.reduce-animations .anim-dropdown-in,
+body.reduce-animations .anim-slide-down,
+body.reduce-animations .anim-slide-in-left,
+body.reduce-animations .anim-slide-in-right,
+body.reduce-animations .anim-tab-in,
+body.reduce-animations .anim-toast-in,
+body.reduce-animations .anim-stagger-item,
+body.reduce-animations .pf-toolbar-anim {
+  animation: pfFadeIn 50ms var(--ease-out) both !important;
+}
+
+body.reduce-animations .anim-pop-out,
+body.reduce-animations .anim-dropdown-out,
+body.reduce-animations .anim-slide-down-out,
+body.reduce-animations .anim-slide-out-left,
+body.reduce-animations .anim-slide-out-right,
+body.reduce-animations .anim-tab-out,
+body.reduce-animations .anim-toast-out,
+body.reduce-animations #root.pf-app-closing {
+  animation: pfFadeOut 50ms var(--ease-in) forwards !important;
+}
+
+body.reduce-animations .anim-shake,
+body.reduce-animations .anim-flash-value,
+body.reduce-animations .anim-match-pulse {
+  animation: pfFadeIn 50ms var(--ease-out) both !important;
+}
+
+body.reduce-animations .pf-splash-bar,
+body.reduce-animations .pf-progress-bar-fill,
+body.reduce-animations .pf-page-skeleton::after {
+  animation: none !important;
+}
+
+body.reduce-animations button:active:not(:disabled),
+body.reduce-animations [role="button"]:active:not(:disabled) {
+  transform: none !important;
+}
+
+body.reduce-animations .pf-tab-indicator,
+body.reduce-animations .pf-chevron,
+body.reduce-animations .pf-tool-btn::after {
+  transition: opacity 50ms linear !important;
+}

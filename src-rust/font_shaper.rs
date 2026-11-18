@@ -813,7 +813,7 @@ fn map_to_standard14_name(font_hint: &str, bold: bool, italic: bool) -> &'static
 }
 
 /// Ensure the PDF page `/Resources -> /Font` contains either a Standard14 WinAnsi font
-/// OR a full TrueType Type0 CIDFontType2 + ToUnicode CMap for Bangla/Unicode text.
+/// OR a full TrueType Type0 CIDFontType2 + ToUnicode CMap for custom / Unicode / Bangla text.
 pub fn ensure_page_font_resource(
     doc: &mut lopdf::Document,
     page_id: ObjectId,
@@ -822,8 +822,21 @@ pub fn ensure_page_font_resource(
     italic: bool,
     full_text: &str,
 ) -> Result<PdfFontWriteMode, String> {
+    let clean_hint = strip_subset_prefix(font_hint).trim().to_lowercase();
+    let is_raw_std14 = matches!(
+        clean_hint.as_str(),
+        "" | "helvetica" | "helvetica-bold" | "helvetica-oblique" | "helvetica-boldoblique"
+            | "times" | "times-roman" | "times-bold" | "times-italic" | "times-bolditalic"
+            | "courier" | "courier-bold" | "courier-oblique" | "courier-boldoblique"
+    );
     let needs_unicode = contains_non_winansi(full_text);
-    if !needs_unicode {
+    let sys_font_opt = if needs_unicode || !is_raw_std14 {
+        resolve_system_font(font_hint, bold, italic, full_text)
+    } else {
+        None
+    };
+
+    if !needs_unicode && sys_font_opt.is_none() {
         let base_font = map_to_standard14_name(font_hint, bold, italic);
         let res_name = format!("PF_{}", base_font.replace('-', "_"));
 
@@ -839,9 +852,9 @@ pub fn ensure_page_font_resource(
         });
     }
 
-    let (ttf_bytes, face_idx, fam_name) =
-        resolve_system_font(font_hint, bold, italic, full_text)
-            .ok_or_else(|| format!("No offline system TrueType font available for '{}'", font_hint))?;
+    let (ttf_bytes, face_idx, fam_name) = sys_font_opt
+        .or_else(|| resolve_system_font(font_hint, bold, italic, full_text))
+        .ok_or_else(|| format!("No offline system TrueType font available for '{}'", font_hint))?;
     let face = TtfFace::parse(&ttf_bytes, face_idx)
         .map_err(|e| format!("Failed parsing system font '{}': {:?}", fam_name, e))?;
 
@@ -956,7 +969,7 @@ pub fn ensure_page_font_resource(
     type0.set("ToUnicode", Object::Reference(tounicode_id));
     let type0_id = doc.add_object(Object::Dictionary(type0));
 
-    let res_name = format!("PFCID_{}", ps_name);
+    let res_name = format!("PFCID_{}_{}", ps_name, type0_id.0);
     attach_resource_entry(doc, page_id, b"Font", &res_name, Object::Reference(type0_id))?;
 
     Ok(PdfFontWriteMode::EmbeddedCidTrueType {

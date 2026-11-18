@@ -124,6 +124,7 @@ pub struct ImageStreamObject {
     pub op_index: usize,
     pub name: String,
     pub bbox_vp: [f32; 4],
+    pub ctm: [f32; 6],
     pub pixel_width: i64,
     pub pixel_height: i64,
 }
@@ -824,6 +825,7 @@ pub fn parse_page_objects(
                             op_index: idx,
                             name: xname,
                             bbox_vp: [bx, by, bw, bh],
+                            ctm: gs.ctm,
                             pixel_width: pw,
                             pixel_height: ph,
                         });
@@ -1066,9 +1068,10 @@ pub fn commit_edit_text_block(
         new_ops.push(op);
     }
 
-    // Also add clean background cover rect only if no whole BT..ET isolated cleanly
+    // Also add clean background cover rect only when editing an existing region that wasn't isolated via BT..ET
     let mut reflow_notice: Option<String> = None;
-    if matched_ranges.is_empty() {
+    let has_orig_box = ow > 0.5 && oh > 0.5;
+    if has_orig_box && matched_ranges.is_empty() {
         let bg_rgb = hex_to_rgb(req.bg_color.as_deref().unwrap_or("#ffffff"));
         let (p0x, p0y) = pt.vp_to_pdf(ox - 1.0, oy - 1.0);
         let (p1x, p1y) = pt.vp_to_pdf(ox + ow + 2.0, oy + oh + 2.0);
@@ -1502,5 +1505,162 @@ pub fn commit_shape_operation(
         .map_err(|e| format!("Failed encoding updated shape stream: {}", e))?;
     doc.change_page_content(page_id, encoded)
         .map_err(|e| format!("Failed saving updated shape stream: {}", e))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCommitRequest {
+    pub page: usize,
+    pub action: String, // "move" | "resize" | "rotate" | "crop" | "replace" | "delete" | "add"
+    pub op_index: Option<usize>,
+    pub resource_name: Option<String>,
+    pub bbox_vp: [f32; 4],
+    pub crop_bbox_vp: Option<[f32; 4]>,
+    pub rotation_deg: Option<f32>,
+    pub image_data_url: Option<String>,
+    pub rgba_base64: Option<String>,
+    pub pixel_width: Option<u32>,
+    pub pixel_height: Option<u32>,
+}
+
+/// Computes PDF `cm` affine matrix mapping the unit square [0..1, 0..1] to the target
+/// viewport rectangle `bbox_vp`, taking PageTransform (/Rotate + /CropBox) and optional rotation into account.
+fn compute_image_pdf_cm(pt: &PageTransform, bbox_vp: [f32; 4], rot_deg: f32) -> [f32; 6] {
+    let [vx, vy, vw, vh] = bbox_vp;
+    let cx = vx + vw * 0.5;
+    let cy = vy + vh * 0.5;
+    let rad = rot_deg.to_radians();
+    let (cos_r, sin_r) = (rad.cos(), rad.sin());
+    let rot_vp = |x: f32, y: f32| -> (f32, f32) {
+        if rot_deg.abs() < 0.01 {
+            (x, y)
+        } else {
+            let dx = x - cx;
+            let dy = y - cy;
+            (cx + dx * cos_r - dy * sin_r, cy + dx * sin_r + dy * cos_r)
+        }
+    };
+    // Unit image space: (0,0) = bottom-left, (1,0) = bottom-right, (0,1) = top-left
+    let (v_bl_x, v_bl_y) = rot_vp(vx, vy + vh);
+    let (v_br_x, v_br_y) = rot_vp(vx + vw, vy + vh);
+    let (v_tl_x, v_tl_y) = rot_vp(vx, vy);
+
+    let p00 = pt.vp_to_pdf(v_bl_x, v_bl_y);
+    let p10 = pt.vp_to_pdf(v_br_x, v_br_y);
+    let p01 = pt.vp_to_pdf(v_tl_x, v_tl_y);
+
+    [
+        p10.0 - p00.0,
+        p10.1 - p00.1,
+        p01.0 - p00.0,
+        p01.1 - p00.1,
+        p00.0,
+        p00.1,
+    ]
+}
+
+/// Mutates a real Image XObject and/or its `cm` transformation matrix in the page's content stream (`lopdf`).
+pub fn commit_image_operation(
+    doc: &mut lopdf::Document,
+    req: &ImageCommitRequest,
+) -> Result<(), String> {
+    let page_num = req.page.max(1) as u32;
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&page_num)
+        .ok_or_else(|| format!("Page {} does not exist", page_num))?;
+
+    let pt = get_page_transform(doc, page_id);
+    let raw = doc.get_page_content(page_id);
+    let mut content =
+        Content::decode(&raw).map_err(|e| format!("Failed decoding page {} stream: {}", page_num, e))?;
+
+    // Resolve image XObject name & optionally create a replacement/new Image XObject
+    let mut res_name = req
+        .resource_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("PFIm_{}_{}", page_num, content.operations.len()));
+
+    if matches!(req.action.as_str(), "replace" | "add") {
+        if let Some(xobj_id) = crate::pdf_annots::build_image_xobject_from_req(
+            doc,
+            req.image_data_url.as_deref(),
+            req.rgba_base64.as_deref(),
+            req.pixel_width,
+            req.pixel_height,
+        )? {
+            if req.action == "add" || req.resource_name.is_none() {
+                res_name = format!("PFIm_{}_{}", page_num, xobj_id.0);
+            }
+            attach_resource_entry(doc, page_id, b"XObject", &res_name, Object::Reference(xobj_id))?;
+        } else if req.action == "add" {
+            return Err("Missing image pixels for image insert".into());
+        }
+    }
+
+    // Remove the previous `Do /res_name` (and immediately preceding `cm` if inside an isolated q..Q)
+    if req.action != "add" {
+        if let Some(target_idx) = req.op_index {
+            if target_idx < content.operations.len() && content.operations[target_idx].operator == "Do" {
+                let mut rem_start = target_idx;
+                let mut rem_end = target_idx;
+                // Check if wrapped tightly as `q cm Do Q` or `cm Do`
+                if target_idx >= 1 && content.operations[target_idx - 1].operator == "cm" {
+                    rem_start = target_idx - 1;
+                    if rem_start >= 1
+                        && content.operations[rem_start - 1].operator == "q"
+                        && target_idx + 1 < content.operations.len()
+                        && content.operations[target_idx + 1].operator == "Q"
+                    {
+                        rem_start -= 1;
+                        rem_end += 1;
+                    }
+                }
+                let mut next_ops = Vec::with_capacity(content.operations.len());
+                for (i, op) in content.operations.drain(..).enumerate() {
+                    if i >= rem_start && i <= rem_end {
+                        continue;
+                    }
+                    next_ops.push(op);
+                }
+                content.operations = next_ops;
+            }
+        }
+    }
+
+    if req.action != "delete" {
+        let cm = compute_image_pdf_cm(&pt, req.bbox_vp, req.rotation_deg.unwrap_or(0.0));
+        content.operations.push(Operation::new("q", vec![]));
+        if let Some(crop_vp) = req.crop_bbox_vp {
+            let [cx0, cy0, cx1, cy1] = crate::pdf_annots::vp_rect_to_pdf_rect(&pt, crop_vp);
+            content.operations.push(Operation::new(
+                "re",
+                vec![
+                    Object::Real(cx0),
+                    Object::Real(cy0),
+                    Object::Real((cx1 - cx0).max(1.0)),
+                    Object::Real((cy1 - cy0).max(1.0)),
+                ],
+            ));
+            content.operations.push(Operation::new("W", vec![]));
+            content.operations.push(Operation::new("n", vec![]));
+        }
+        content.operations.push(Operation::new(
+            "cm",
+            cm.into_iter().map(Object::Real).collect(),
+        ));
+        content
+            .operations
+            .push(Operation::new("Do", vec![Object::Name(res_name.into_bytes())]));
+        content.operations.push(Operation::new("Q", vec![]));
+    }
+
+    let encoded = content
+        .encode()
+        .map_err(|e| format!("Failed encoding updated image stream: {}", e))?;
+    doc.change_page_content(page_id, encoded)
+        .map_err(|e| format!("Failed saving updated image stream: {}", e))?;
     Ok(())
 }
