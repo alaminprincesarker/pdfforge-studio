@@ -200,23 +200,23 @@ html, body {
 
 /* Shared Utility Classes */
 .anim-app-enter {
-  animation: pfAppEnter 160ms var(--ease-out) both;
+  animation: pfAppEnter 160ms var(--ease-out) backwards;
 }
 
 .anim-fade-in {
-  animation: pfFadeIn var(--dur-normal) var(--ease-out) both;
+  animation: pfFadeIn var(--dur-normal) var(--ease-out) backwards;
 }
 
 .anim-fade-in-fast {
-  animation: pfFadeIn 65ms var(--ease-out) both;
+  animation: pfFadeIn 65ms var(--ease-out) backwards;
 }
 
 .anim-fade-in-120 {
-  animation: pfFadeIn var(--dur-fast) var(--ease-out) both;
+  animation: pfFadeIn var(--dur-fast) var(--ease-out) backwards;
 }
 
 .anim-fade-in-150 {
-  animation: pfFadeIn 90ms var(--ease-out) both;
+  animation: pfFadeIn 90ms var(--ease-out) backwards;
 }
 
 .anim-fade-out {
@@ -228,7 +228,7 @@ html, body {
 }
 
 .anim-pop-in {
-  animation: pfPopIn var(--dur-normal) var(--ease-out) both;
+  animation: pfPopIn var(--dur-normal) var(--ease-out) backwards;
 }
 
 .anim-pop-out {
@@ -237,7 +237,7 @@ html, body {
 
 .anim-dropdown-in {
   transform-origin: top center;
-  animation: pfDropdownIn 90ms var(--ease-out) both;
+  animation: pfDropdownIn 90ms var(--ease-out) backwards;
 }
 
 .anim-dropdown-out {
@@ -246,7 +246,7 @@ html, body {
 }
 
 .anim-slide-down {
-  animation: pfSlideDownIn 95ms var(--ease-out) both;
+  animation: pfSlideDownIn 95ms var(--ease-out) backwards;
 }
 
 .anim-slide-down-out {
@@ -254,7 +254,7 @@ html, body {
 }
 
 .anim-slide-in-left {
-  animation: pfSlideInLeft var(--dur-normal) var(--ease-out) both;
+  animation: pfSlideInLeft var(--dur-normal) var(--ease-out) backwards;
 }
 
 .anim-slide-out-left {
@@ -262,7 +262,7 @@ html, body {
 }
 
 .anim-slide-in-right {
-  animation: pfSlideInRight var(--dur-normal) var(--ease-out) both;
+  animation: pfSlideInRight var(--dur-normal) var(--ease-out) backwards;
 }
 
 .anim-slide-out-right {
@@ -271,7 +271,7 @@ html, body {
 
 .anim-tab-in {
   transform-origin: left center;
-  animation: pfTabIn 90ms var(--ease-out) both;
+  animation: pfTabIn 90ms var(--ease-out) backwards;
 }
 
 .anim-tab-out {
@@ -280,7 +280,7 @@ html, body {
 }
 
 .anim-toast-in {
-  animation: pfSlideUpIn var(--dur-normal) var(--ease-out) both;
+  animation: pfSlideUpIn var(--dur-normal) var(--ease-out) backwards;
 }
 
 .anim-toast-out {
@@ -481,7 +481,9 @@ textarea:focus-visible,
 
 /* Compact / Fullscreen toolbar reveal */
 .pf-toolbar-anim {
-  animation: pfSlideDownIn var(--dur-normal) var(--ease-out) both;
+  position: relative;
+  z-index: 40;
+  animation: pfSlideDownIn var(--dur-normal) var(--ease-out) backwards;
 }
 
 /* Close window transition */
