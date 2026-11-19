@@ -1023,7 +1023,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.2.4';
+      return '1.2.5';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -1417,13 +1417,17 @@ fn handle_api_request(
                             ));
                             return;
                         }
-                        if let Err(e) = ws.load_backing(&p.file_path) {
-                            responder.respond(json_response(
-                                StatusCode::BAD_REQUEST,
-                                &json!({ "ok": false, "error": e }),
-                            ));
-                            return;
-                        }
+                        let (backing, rev, _dirty) = match ws.load_backing(&p.file_path) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                responder.respond(json_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &json!({ "ok": false, "error": e }),
+                                ));
+                                return;
+                            }
+                        };
+                        let live_size = backing.len() as u64;
                         let id = reg.register(&p.file_path);
                         let file_name = std::path::Path::new(&p.file_path)
                             .file_name()
@@ -1434,11 +1438,12 @@ fn handle_api_request(
                             &json!({
                                 "ok": true,
                                 "id": id,
-                                "url": format!("/file/{}", id),
-                                "size": size,
+                                "url": format!("/file/{}?rev={}", id, rev),
+                                "size": live_size,
+                                "revision": rev,
                                 "fileName": file_name,
-                                "disableAutoFetch": size > 20 * 1024 * 1024,
-                                "heavyHint": size > 80 * 1024 * 1024
+                                "disableAutoFetch": live_size > 20 * 1024 * 1024,
+                                "heavyHint": live_size > 80 * 1024 * 1024
                             }),
                         ));
                     });

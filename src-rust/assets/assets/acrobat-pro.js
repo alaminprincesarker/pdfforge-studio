@@ -3409,15 +3409,90 @@ export function mountAcrobatPageSurface(opts) {
     ev.stopPropagation();
     const isMarkup = isTextMarkupTool(tool);
     const clickDetail = ev.detail || 1;
-    const hit = await window.pdfAcrobat.hitTest(filePath, page, px, py).catch(() => null);
+    const startClientX = ev.clientX;
+    const startClientY = ev.clientY;
+    const resolveHighlightColor = () => {
+      const col = (getActiveColor && getActiveColor()) || getSavedHighlightColor() || "#facc15";
+      setSavedHighlightColor(col);
+      return col;
+    };
+
+    // Track pointer motion & release synchronously BEFORE any async IPC so fast drags never get dropped
+    const preDrag = {
+      moved: false,
+      ended: false,
+      lastClientX: startClientX,
+      lastClientY: startClientY,
+    };
+    const onPreMove = (e2) => {
+      preDrag.lastClientX = e2.clientX;
+      preDrag.lastClientY = e2.clientY;
+      if (Math.hypot(e2.clientX - startClientX, e2.clientY - startClientY) >= 3) {
+        preDrag.moved = true;
+      }
+    };
+    const onPreUp = (e2) => {
+      preDrag.lastClientX = e2.clientX;
+      preDrag.lastClientY = e2.clientY;
+      preDrag.ended = true;
+      window.removeEventListener("pointermove", onPreMove);
+      window.removeEventListener("pointerup", onPreUp);
+    };
+    window.addEventListener("pointermove", onPreMove);
+    window.addEventListener("pointerup", onPreUp);
+    const detachPre = () => {
+      window.removeEventListener("pointermove", onPreMove);
+      window.removeEventListener("pointerup", onPreUp);
+    };
+
+    let hit = null;
+    if (clickDetail === 1 && layoutData && Array.isArray(layoutData.chars)) {
+      if (layoutData.chars.length > 0) {
+        for (let ci = 0; ci < layoutData.chars.length; ci++) {
+          const ch = layoutData.chars[ci];
+          const [bx, by, bw, bh] = ch.bbox;
+          if (px >= bx - 6 && px <= bx + bw + 6 && py >= by - 6 && py <= by + bh + 6) {
+            hit = { hit: true, charIndex: ch.index };
+            break;
+          }
+        }
+      }
+      if (!hit) {
+        hit = { hit: false, charIndex: null };
+      }
+    }
+    if (!hit) {
+      hit = await window.pdfAcrobat.hitTest(filePath, page, px, py).catch(() => null);
+    }
+
     if (!hit || hit.charIndex === null || hit.charIndex === undefined) {
+      detachPre();
       clearSelection(filePath);
       if (tool === "highlight") {
         // Area highlight fallback for scanned / non-text regions
         const startPt = [px, py];
         const ctx = syncCanvasSize();
         const sc = curScale();
-        const hlCol = getSavedHighlightColor() || (getActiveColor && getActiveColor()) || "#facc15";
+        const hlCol = resolveHighlightColor();
+        const commitArea = (clientX, clientY) => {
+          clearInkCanvas();
+          const [ex, ey] = clientToPdf(clientX, clientY);
+          const bx = Math.min(startPt[0], ex),
+            by = Math.min(startPt[1], ey);
+          const bw = Math.abs(ex - startPt[0]),
+            bh = Math.abs(ey - startPt[1]);
+          if (bw > 8 && bh > 6) {
+            api.applyMarkupBatch(
+              "highlight",
+              [{ page, rects: [{ x: bx, y: by, width: bw, height: bh }], text: "Area Highlight" }],
+              hlCol
+            );
+          }
+        };
+        if (preDrag.ended) {
+          commitArea(preDrag.lastClientX, preDrag.lastClientY);
+          return;
+        }
         const onMvArea = (e2) => {
           const [nx, ny] = clientToPdf(e2.clientX, e2.clientY);
           clearInkCanvas();
@@ -3436,30 +3511,26 @@ export function mountAcrobatPageSurface(opts) {
         const onUpArea = async (e2) => {
           window.removeEventListener("pointermove", onMvArea);
           window.removeEventListener("pointerup", onUpArea);
-          clearInkCanvas();
-          const [ex, ey] = clientToPdf(e2.clientX, e2.clientY);
-          const bx = Math.min(startPt[0], ex),
-            by = Math.min(startPt[1], ey);
-          const bw = Math.abs(ex - startPt[0]),
-            bh = Math.abs(ey - startPt[1]);
-          if (bw > 8 && bh > 6) {
-            api.applyMarkupBatch("highlight", [{ page, rects: [{ x: bx, y: by, width: bw, height: bh }], text: "Area Highlight" }], hlCol);
-          }
+          commitArea(e2.clientX, e2.clientY);
         };
         window.addEventListener("pointermove", onMvArea);
         window.addEventListener("pointerup", onUpArea);
+        if (preDrag.moved) {
+          onMvArea({ clientX: preDrag.lastClientX, clientY: preDrag.lastClientY });
+        }
       }
       return;
     }
 
     if (clickDetail >= 2) {
+      detachPre();
       const rng = clickDetail === 2 ? hit.wordRange : clickDetail === 3 ? hit.lineRange : hit.blockRange;
       if (rng && rng.length === 2) {
         selectionState = await computeRangeState(filePath, page, rng[0], page, rng[1], true);
         emitSelectionChange();
         updateAllSelectionLayersForFile(filePath);
         if (isMarkup && selectionState.active) {
-          await applySelectionAction(tool, tool === "highlight" ? getSavedHighlightColor() : undefined);
+          await applySelectionAction(tool, tool === "highlight" ? resolveHighlightColor() : undefined);
           clearSelection(filePath);
         }
       }
@@ -3470,22 +3541,49 @@ export function mountAcrobatPageSurface(opts) {
     const anchorChar = hit.charIndex;
     let focusPage = page;
     let focusChar = anchorChar;
-    let dragged = false;
-
-    const startClientX = ev.clientX;
-    const startClientY = ev.clientY;
+    let dragged = preDrag.moved;
     let rafPending = false;
 
-    const onMove = (e2) => {
-      if (!dragged && Math.hypot(e2.clientX - startClientX, e2.clientY - startClientY) < 3) return;
-      dragged = true;
-      const targetCtrl = findPageControllerAtClient(e2.clientX, e2.clientY) || api;
+    const updateFocusFromClient = (clientX, clientY) => {
+      const targetCtrl = findPageControllerAtClient(clientX, clientY) || api;
       const targetPage = targetCtrl.getPage();
-      const [nx, ny] = targetCtrl.mapClientToPdf(e2.clientX, e2.clientY);
+      const [nx, ny] = targetCtrl.mapClientToPdf(clientX, clientY);
       const nextChar = localFindChar(targetCtrl.getLayout(), nx, ny);
       if (nextChar !== null && (nextChar !== focusChar || targetPage !== focusPage)) {
         focusPage = targetPage;
         focusChar = nextChar;
+        return true;
+      }
+      return false;
+    };
+
+    const finalizeTextDrag = async () => {
+      if (!dragged) {
+        clearSelection(filePath);
+        return;
+      }
+      selectionState = await computeRangeState(filePath, anchorPage, anchorChar, focusPage, focusChar, true);
+      emitSelectionChange();
+      updateAllSelectionLayersForFile(filePath);
+      if (isMarkup && selectionState.active) {
+        await applySelectionAction(tool, tool === "highlight" ? resolveHighlightColor() : undefined);
+        clearSelection(filePath);
+      }
+    };
+
+    detachPre();
+    if (preDrag.moved) {
+      updateFocusFromClient(preDrag.lastClientX, preDrag.lastClientY);
+    }
+    if (preDrag.ended) {
+      await finalizeTextDrag();
+      return;
+    }
+
+    const onMove = (e2) => {
+      if (!dragged && Math.hypot(e2.clientX - startClientX, e2.clientY - startClientY) < 3) return;
+      dragged = true;
+      if (updateFocusFromClient(e2.clientX, e2.clientY)) {
         if (!rafPending) {
           rafPending = true;
           requestAnimationFrame(async () => {
@@ -3498,20 +3596,13 @@ export function mountAcrobatPageSurface(opts) {
       }
     };
 
-    const onUp = async () => {
+    const onUp = async (e2) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!dragged) {
-        clearSelection(filePath);
-        return;
+      if (dragged) {
+        updateFocusFromClient(e2.clientX, e2.clientY);
       }
-      selectionState = await computeRangeState(filePath, anchorPage, anchorChar, focusPage, focusChar, true);
-      emitSelectionChange();
-      updateAllSelectionLayersForFile(filePath);
-      if (isMarkup && selectionState.active) {
-        await applySelectionAction(tool, tool === "highlight" ? getSavedHighlightColor() : undefined);
-        clearSelection(filePath);
-      }
+      await finalizeTextDrag();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -3593,13 +3684,16 @@ export function mountAcrobatPageSurface(opts) {
       const k = ev.key.toLowerCase();
       if (k === "h") {
         ev.preventDefault();
-        await applySelectionAction("highlight");
+        await applySelectionAction("highlight", (getActiveColor && getActiveColor()) || undefined);
+        clearSelection(filePath);
       } else if (k === "u") {
         ev.preventDefault();
         await applySelectionAction("underline");
+        clearSelection(filePath);
       } else if (k === "s") {
         ev.preventDefault();
         await applySelectionAction("strikethrough");
+        clearSelection(filePath);
       }
     }
   };
