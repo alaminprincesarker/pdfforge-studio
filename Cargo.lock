@@ -2406,14 +2406,18 @@ dependencies = [
 
 [[package]]
 name = "pdfforge"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "base64",
+ "crc32fast",
+ "flate2",
  "fontdb",
  "http",
  "lopdf",
+ "memmap2",
  "mime_guess",
  "pdfium-render",
+ "rayon",
  "rfd",
  "rust-embed",
  "rustybuzz",

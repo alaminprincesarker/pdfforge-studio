@@ -86,24 +86,53 @@ export function bumpRevision(filePath, rev, page) {
   }
 }
 
+export function evictFileCaches(filePath) {
+  if (!filePath) return;
+  clearSelection(filePath);
+  for (const k of Array.from(layoutCache.keys())) {
+    if (k.startsWith(`${filePath}::`)) layoutCache.delete(k);
+  }
+  for (const k of Array.from(objectsCache.keys())) {
+    if (k.startsWith(`${filePath}::`)) objectsCache.delete(k);
+  }
+}
+
+const MAX_ACROBAT_CACHE_PAGES = 24;
+
 export function getCachedLayout(filePath, page) {
   if (!window.pdfAcrobat || !filePath) return Promise.resolve(null);
   const key = `${filePath}::${getRev(filePath)}::${page}`;
-  if (!layoutCache.has(key)) {
-    const p = window.pdfAcrobat.getPageLayout(filePath, page).catch(() => null);
-    layoutCache.set(key, p);
+  if (layoutCache.has(key)) {
+    const val = layoutCache.get(key);
+    layoutCache.delete(key);
+    layoutCache.set(key, val);
+    return val;
   }
-  return layoutCache.get(key);
+  const p = window.pdfAcrobat.getPageLayout(filePath, page).catch(() => null);
+  layoutCache.set(key, p);
+  while (layoutCache.size > MAX_ACROBAT_CACHE_PAGES) {
+    const first = layoutCache.keys().next().value;
+    layoutCache.delete(first);
+  }
+  return p;
 }
 
 export function getCachedObjects(filePath, page) {
   if (!window.pdfAcrobat || !filePath) return Promise.resolve(null);
   const key = `${filePath}::${getRev(filePath)}::${page}`;
-  if (!objectsCache.has(key)) {
-    const p = window.pdfAcrobat.getObjects(filePath, page).catch(() => null);
-    objectsCache.set(key, p);
+  if (objectsCache.has(key)) {
+    const val = objectsCache.get(key);
+    objectsCache.delete(key);
+    objectsCache.set(key, val);
+    return val;
   }
-  return objectsCache.get(key);
+  const p = window.pdfAcrobat.getObjects(filePath, page).catch(() => null);
+  objectsCache.set(key, p);
+  while (objectsCache.size > MAX_ACROBAT_CACHE_PAGES) {
+    const first = objectsCache.keys().next().value;
+    objectsCache.delete(first);
+  }
+  return p;
 }
 
 export function getSystemFonts() {
@@ -3748,6 +3777,15 @@ export function mountAcrobatPageSurface(opts) {
       destroyed = true;
       window.removeEventListener("keydown", onKeyDown);
       if (activeTextEditor) activeTextEditor();
+      try {
+        inkCanvas.width = 0;
+        inkCanvas.height = 0;
+        svgLayer.innerHTML = "";
+        selLayer.innerHTML = "";
+        formLayer.innerHTML = "";
+        shapeHudLayer.innerHTML = "";
+        editTextLayer.innerHTML = "";
+      } catch {}
       root.remove();
       pageControllers.delete(ctrlKey);
     },

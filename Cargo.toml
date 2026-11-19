@@ -1,6 +1,6 @@
 [package]
 name = "pdfforge"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 description = "PDFForge - 100% Offline Desktop PDF Reader & Editor (Rust Native Edition)"
 authors = ["Md. Alamin <alaminprincesarker@gmail.com>"]
@@ -28,6 +28,10 @@ rustybuzz = "0.20.1"
 ttf-parser = "0.25.1"
 fontdb = "0.24.0"
 unicode-bidi = "0.3.18"
+memmap2 = "0.9"
+flate2 = "1.1"
+crc32fast = "1.5"
+rayon = "1.12"
 
 [profile.release]
 opt-level = 3

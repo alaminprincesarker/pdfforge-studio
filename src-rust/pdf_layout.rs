@@ -5,9 +5,11 @@ use crate::pdf_objects::{
     parse_page_objects, PageObjectsResult, PageTransform,
 };
 use lopdf::Document as LoDocument;
+use memmap2::Mmap;
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use unicode_bidi::BidiInfo;
@@ -123,6 +125,7 @@ pub struct SelectionRectsResult {
 }
 
 static PDFIUM_INSTANCE: OnceLock<Arc<Mutex<Pdfium>>> = OnceLock::new();
+static PDFIUM_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn locate_pdfium_library_path() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -146,6 +149,10 @@ pub fn get_pdfium() -> Result<Arc<Mutex<Pdfium>>, String> {
     if let Some(inst) = PDFIUM_INSTANCE.get() {
         return Ok(inst.clone());
     }
+    let _init_guard = PDFIUM_INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(inst) = PDFIUM_INSTANCE.get() {
+        return Ok(inst.clone());
+    }
     let bindings = if let Some(path) = locate_pdfium_library_path() {
         Pdfium::bind_to_library(&path)
             .map_err(|e| format!("Failed binding PDFium at {}: {:?}", path.display(), e))?
@@ -159,32 +166,263 @@ pub fn get_pdfium() -> Result<Arc<Mutex<Pdfium>>, String> {
     Ok(inst)
 }
 
+#[derive(Clone)]
+pub enum PdfBacking {
+    Mmap(Arc<Mmap>),
+    Bytes(Arc<Vec<u8>>),
+}
+
+impl Default for PdfBacking {
+    fn default() -> Self {
+        Self::Bytes(Arc::new(Vec::new()))
+    }
+}
+
+impl std::ops::Deref for PdfBacking {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            PdfBacking::Mmap(m) => &m[..],
+            PdfBacking::Bytes(b) => &b[..],
+        }
+    }
+}
+
+impl PdfBacking {
+    pub fn len(&self) -> usize {
+        (**self).len()
+    }
+    pub fn is_mmap(&self) -> bool {
+        matches!(self, PdfBacking::Mmap(_))
+    }
+}
+
+fn open_mmap_or_bytes(file_path: &str) -> Result<PdfBacking, String> {
+    let f = std::fs::File::open(file_path)
+        .map_err(|e| format!("Failed opening PDF '{}': {}", file_path, e))?;
+    let meta = f
+        .metadata()
+        .map_err(|e| format!("Failed reading PDF metadata '{}': {}", file_path, e))?;
+    if meta.len() == 0 {
+        return Err("PDF file is empty (0 bytes)".to_string());
+    }
+    if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&f) } {
+        return Ok(PdfBacking::Mmap(Arc::new(mmap)));
+    }
+    let disk_bytes = std::fs::read(file_path)
+        .map_err(|e| format!("Failed reading PDF '{}': {}", file_path, e))?;
+    Ok(PdfBacking::Bytes(Arc::new(disk_bytes)))
+}
+
 #[derive(Default)]
 struct WorkingDocument {
     #[allow(dead_code)]
     canonical_key: String,
+    disk_path: Option<String>,
     orig_disk_bytes: Option<Vec<u8>>,
-    bytes: Vec<u8>,
+    backing: PdfBacking,
+    is_dirty: bool,
     revision: u64,
-    undo_stack: Vec<Vec<u8>>,
-    redo_stack: Vec<Vec<u8>>,
+    undo_stack: Vec<PdfBacking>,
+    redo_stack: Vec<PdfBacking>,
     layout_cache: HashMap<usize, Arc<PageLayout>>,
+    layout_order: VecDeque<usize>,
     objects_cache: HashMap<usize, Arc<PageObjectsResult>>,
+    objects_order: VecDeque<usize>,
+}
+
+const MAX_PAGE_CACHE_PER_DOC: usize = 16;
+const LARGE_DOC_BYTES_THRESHOLD: usize = 20 * 1024 * 1024;
+
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct RustRenderCacheKey {
+    pub doc_key: String,
+    pub revision: u64,
+    pub page: usize,
+    pub width: u32,
+    pub height: u32,
+    pub rotation: i32,
+    pub tile_x: i32,
+    pub tile_y: i32,
+    pub tile_w: u32,
+    pub tile_h: u32,
+}
+
+#[derive(Default)]
+struct RustRenderCacheInner {
+    entries: HashMap<RustRenderCacheKey, Arc<Vec<u8>>>,
+    lru_order: VecDeque<RustRenderCacheKey>,
+    total_bytes: usize,
+    budget_bytes: usize,
+}
+
+#[derive(Clone)]
+pub struct RustPageRenderCache {
+    inner: Arc<Mutex<RustRenderCacheInner>>,
+}
+
+impl Default for RustPageRenderCache {
+    fn default() -> Self {
+        Self::new(300 * 1024 * 1024)
+    }
+}
+
+impl RustPageRenderCache {
+    pub fn new(budget_bytes: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RustRenderCacheInner {
+                entries: HashMap::new(),
+                lru_order: VecDeque::new(),
+                total_bytes: 0,
+                budget_bytes: budget_bytes.max(64 * 1024 * 1024),
+            })),
+        }
+    }
+
+    pub fn set_budget_bytes(&self, budget_bytes: usize) {
+        let mut g = self.inner.lock().unwrap();
+        g.budget_bytes = budget_bytes.clamp(64 * 1024 * 1024, 2048 * 1024 * 1024);
+        Self::evict_to_budget(&mut g);
+    }
+
+    pub fn stats(&self) -> (usize, usize) {
+        let g = self.inner.lock().unwrap();
+        (g.entries.len(), g.total_bytes)
+    }
+
+    fn evict_to_budget(g: &mut RustRenderCacheInner) {
+        while g.total_bytes > g.budget_bytes {
+            if let Some(old_k) = g.lru_order.pop_front() {
+                if let Some(v) = g.entries.remove(&old_k) {
+                    g.total_bytes = g.total_bytes.saturating_sub(v.len());
+                }
+            } else {
+                g.total_bytes = 0;
+                break;
+            }
+        }
+    }
+
+    pub fn get(&self, key: &RustRenderCacheKey) -> Option<Arc<Vec<u8>>> {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(v) = g.entries.get(key).cloned() {
+            g.lru_order.retain(|k| k != key);
+            g.lru_order.push_back(key.clone());
+            return Some(v);
+        }
+        None
+    }
+
+    pub fn insert(&self, key: RustRenderCacheKey, data: Arc<Vec<u8>>) {
+        let sz = data.len();
+        let mut g = self.inner.lock().unwrap();
+        if sz > g.budget_bytes {
+            return;
+        }
+        if let Some(prev) = g.entries.remove(&key) {
+            g.total_bytes = g.total_bytes.saturating_sub(prev.len());
+            g.lru_order.retain(|k| k != &key);
+        }
+        g.total_bytes += sz;
+        g.entries.insert(key.clone(), data);
+        g.lru_order.push_back(key);
+        Self::evict_to_budget(&mut g);
+    }
+
+    pub fn evict_doc(&self, doc_key: &str) {
+        let mut g = self.inner.lock().unwrap();
+        let keys: Vec<RustRenderCacheKey> = g
+            .entries
+            .keys()
+            .filter(|k| k.doc_key == doc_key)
+            .cloned()
+            .collect();
+        for k in keys {
+            if let Some(v) = g.entries.remove(&k) {
+                g.total_bytes = g.total_bytes.saturating_sub(v.len());
+            }
+            g.lru_order.retain(|x| x != &k);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.entries.clear();
+        g.lru_order.clear();
+        g.total_bytes = 0;
+    }
+}
+
+fn png_chunk(chunk_type: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(chunk_type);
+    hasher.update(data);
+    out.extend_from_slice(&hasher.finalize().to_be_bytes());
+}
+
+pub fn encode_bgra_to_png(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
+    let w = width as usize;
+    let h = height as usize;
+    if bgra.len() < w * h * 4 {
+        return Err("BGRA buffer too small for PNG encoding".to_string());
+    }
+    let mut out = Vec::with_capacity((w * h) / 2 + 128);
+    out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.push(8); // bit depth
+    ihdr.push(6); // RGBA
+    ihdr.push(0); // compression
+    ihdr.push(0); // filter
+    ihdr.push(0); // interlace
+    png_chunk(b"IHDR", &ihdr, &mut out);
+
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut row_buf = vec![0u8; 1 + w * 4];
+    for y in 0..h {
+        row_buf[0] = 0; // filter None
+        let src_row = &bgra[(y * w * 4)..((y + 1) * w * 4)];
+        for x in 0..w {
+            let si = x * 4;
+            let di = 1 + x * 4;
+            row_buf[di] = src_row[si + 2];     // R
+            row_buf[di + 1] = src_row[si + 1]; // G
+            row_buf[di + 2] = src_row[si];     // B
+            row_buf[di + 3] = src_row[si + 3]; // A
+        }
+        encoder
+            .write_all(&row_buf)
+            .map_err(|e| format!("PNG deflate error: {}", e))?;
+    }
+    let idat = encoder
+        .finish()
+        .map_err(|e| format!("PNG deflate finish error: {}", e))?;
+    png_chunk(b"IDAT", &idat, &mut out);
+    png_chunk(b"IEND", &[], &mut out);
+    Ok(out)
 }
 
 #[derive(Clone, Default)]
 pub struct PdfWorkspaceEngine {
     docs: Arc<Mutex<HashMap<String, WorkingDocument>>>,
+    render_cache: RustPageRenderCache,
 }
 
 impl PdfWorkspaceEngine {
     pub fn new() -> Self {
         Self {
             docs: Arc::new(Mutex::new(HashMap::new())),
+            render_cache: RustPageRenderCache::default(),
         }
     }
 
-    fn normalize_key(file_path: &str) -> String {
+    pub fn normalize_key(file_path: &str) -> String {
         file_path
             .trim()
             .strip_prefix(r"\\?\")
@@ -192,47 +430,243 @@ impl PdfWorkspaceEngine {
             .to_lowercase()
     }
 
-    pub fn load_or_sync_from_disk(&self, file_path: &str) -> Result<Vec<u8>, String> {
+    pub fn set_render_budget_mb(&self, mb: u32) {
+        self.render_cache
+            .set_budget_bytes((mb.clamp(64, 2048) as usize) * 1024 * 1024);
+    }
+
+    pub fn render_cache_stats(&self) -> (usize, usize) {
+        self.render_cache.stats()
+    }
+
+    /// Loads or returns a zero-copy `PdfBacking` (`Mmap` if untouched on disk, `Bytes` if edited).
+    pub fn load_backing(&self, file_path: &str) -> Result<(PdfBacking, u64, bool), String> {
         let key = Self::normalize_key(file_path);
         {
             let guard = self.docs.lock().unwrap();
             if let Some(doc) = guard.get(&key) {
-                return Ok(doc.bytes.clone());
+                return Ok((doc.backing.clone(), doc.revision, doc.is_dirty));
             }
         }
-        let disk_bytes = std::fs::read(file_path)
-            .map_err(|e| format!("Failed reading PDF '{}': {}", file_path, e))?;
+        let backing = open_mmap_or_bytes(file_path)?;
         let mut guard = self.docs.lock().unwrap();
-        let entry = guard.entry(key.clone()).or_insert_with(|| WorkingDocument {
+        let entry = guard.entry(key).or_insert_with(|| WorkingDocument {
             canonical_key: file_path.to_string(),
-            orig_disk_bytes: Some(disk_bytes.clone()),
-            bytes: disk_bytes.clone(),
+            disk_path: Some(file_path.to_string()),
+            orig_disk_bytes: None,
+            backing,
+            is_dirty: false,
             revision: 1,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             layout_cache: HashMap::new(),
+            layout_order: VecDeque::new(),
             objects_cache: HashMap::new(),
+            objects_order: VecDeque::new(),
         });
-        Ok(entry.bytes.clone())
+        Ok((entry.backing.clone(), entry.revision, entry.is_dirty))
+    }
+
+    /// Reads only `[start..=end_incl]` from the backing (zero whole-file copy).
+    #[allow(dead_code)]
+    pub fn read_range(
+        &self,
+        file_path: &str,
+        start: u64,
+        end_incl: u64,
+    ) -> Result<(Vec<u8>, u64, u64, bool), String> {
+        let (backing, rev, dirty) = self.load_backing(file_path)?;
+        let total = backing.len() as u64;
+        if total == 0 || start >= total {
+            return Err("Requested byte range out of bounds".to_string());
+        }
+        let clamped_end = end_incl.min(total - 1);
+        let slice = &backing[(start as usize)..=(clamped_end as usize)];
+        Ok((slice.to_vec(), total, rev, dirty))
+    }
+
+    pub fn close_document(&self, file_path: &str) {
+        let key = Self::normalize_key(file_path);
+        self.docs.lock().unwrap().remove(&key);
+        self.render_cache.evict_doc(&key);
+    }
+
+    pub fn suspend_document(&self, file_path: &str) {
+        let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
+        let mut guard = self.docs.lock().unwrap();
+        let should_remove = if let Some(doc) = guard.get_mut(&key) {
+            doc.layout_cache.clear();
+            doc.layout_order.clear();
+            doc.objects_cache.clear();
+            doc.objects_order.clear();
+            !doc.is_dirty
+        } else {
+            false
+        };
+        if should_remove {
+            guard.remove(&key);
+        }
+    }
+
+    /// Drops active Mmap handle pointing to `target_path` so Windows save-in-place never hits file lock.
+    pub fn unmap_for_save(&self, target_path: &str) {
+        let target_key = Self::normalize_key(target_path);
+        let mut guard = self.docs.lock().unwrap();
+        if let Some(doc) = guard.get_mut(&target_key) {
+            if doc.backing.is_mmap() {
+                if let Ok(vec_bytes) = std::fs::read(target_path) {
+                    doc.backing = PdfBacking::Bytes(Arc::new(vec_bytes));
+                }
+            }
+        }
+        // Also ensure no other entry holds a dirty-free mmap on the exact path
+        guard.retain(|k, d| !(k == &target_key && !d.is_dirty && d.backing.is_mmap()));
+    }
+
+    pub fn render_page_png_cached(
+        &self,
+        file_path: &str,
+        page_one: usize,
+        full_width: u32,
+        full_height: u32,
+        rotation_deg: i32,
+        tile: Option<(i32, i32, u32, u32)>,
+        quality_high: bool,
+    ) -> Result<Arc<Vec<u8>>, String> {
+        let (backing, revision, _) = self.load_backing(file_path)?;
+        let key_str = Self::normalize_key(file_path);
+
+        // Enforce max 16 MP cap on rendered canvas / tile
+        let max_pixels: f64 = 16_000_000.0;
+        let full_px = (full_width as f64) * (full_height as f64);
+        let (adj_w, adj_h, adj_tile) = if tile.is_none() && full_px > max_pixels {
+            let factor = (max_pixels / full_px).sqrt();
+            (
+                ((full_width as f64) * factor).round().max(1.0) as u32,
+                ((full_height as f64) * factor).round().max(1.0) as u32,
+                None,
+            )
+        } else if let Some((tx, ty, tw, th)) = tile {
+            let tpx = (tw as f64) * (th as f64);
+            if tpx > max_pixels {
+                let factor = (max_pixels / tpx).sqrt();
+                (
+                    ((full_width as f64) * factor).round().max(1.0) as u32,
+                    ((full_height as f64) * factor).round().max(1.0) as u32,
+                    Some((
+                        ((tx as f64) * factor).round() as i32,
+                        ((ty as f64) * factor).round() as i32,
+                        ((tw as f64) * factor).round().max(1.0) as u32,
+                        ((th as f64) * factor).round().max(1.0) as u32,
+                    )),
+                )
+            } else {
+                (full_width.max(1), full_height.max(1), Some((tx, ty, tw.max(1), th.max(1))))
+            }
+        } else {
+            (full_width.max(1), full_height.max(1), None)
+        };
+
+        let (tx, ty, tw, th) = adj_tile.unwrap_or((0, 0, adj_w, adj_h));
+        let norm_rot = ((rotation_deg % 360) + 360) % 360;
+
+        let cache_key = RustRenderCacheKey {
+            doc_key: key_str,
+            revision,
+            page: page_one.max(1),
+            width: adj_w,
+            height: adj_h,
+            rotation: norm_rot,
+            tile_x: tx,
+            tile_y: ty,
+            tile_w: tw,
+            tile_h: th,
+        };
+
+        if let Some(hit) = self.render_cache.get(&cache_key) {
+            return Ok(hit);
+        }
+
+        let png_bytes = {
+            let pdfium = get_pdfium()?;
+            let pdfium_guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+            let doc = pdfium_guard
+                .load_pdf_from_byte_slice(&backing, None)
+                .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?;
+            let page_idx = (page_one.max(1) - 1) as i32;
+            let pg = doc
+                .pages()
+                .get(page_idx)
+                .map_err(|e| format!("PDFium failed opening page {}: {:?}", page_one, e))?;
+
+            let rot_enum = match norm_rot {
+                90 => PdfPageRenderRotation::Degrees90,
+                180 => PdfPageRenderRotation::Degrees180,
+                270 => PdfPageRenderRotation::Degrees270,
+                _ => PdfPageRenderRotation::None,
+            };
+
+            let mut cfg = PdfRenderConfig::new()
+                .set_target_size(adj_w as i32, adj_h as i32)
+                .rotate(rot_enum, true)
+                .set_clear_color(PdfColor::WHITE)
+                .limit_render_image_cache_size(true)
+                .set_text_smoothing(true)
+                .set_image_smoothing(quality_high)
+                .set_path_smoothing(true)
+                .render_annotations(true)
+                .render_form_data(adj_tile.is_none());
+
+            if adj_tile.is_some() {
+                cfg = cfg.set_origin(-tx, -ty);
+            }
+
+            let mut buf = vec![255u8; (tw as usize) * (th as usize) * 4];
+            let mut bitmap = PdfBitmap::from_bytes(
+                tw as i32,
+                th as i32,
+                PdfBitmapFormat::BGRA,
+                &mut buf,
+            )
+            .map_err(|e| format!("PdfBitmap allocation failed: {:?}", e))?;
+            pg.render_into_bitmap_with_config(&mut bitmap, &cfg)
+                .map_err(|e| format!("PDFium render error: {:?}", e))?;
+            drop(bitmap);
+            encode_bgra_to_png(tw, th, &buf)?
+        };
+
+        let arc_png = Arc::new(png_bytes);
+        self.render_cache.insert(cache_key, arc_png.clone());
+        Ok(arc_png)
+    }
+
+    pub fn load_or_sync_from_disk(&self, file_path: &str) -> Result<Vec<u8>, String> {
+        let (backing, _, _) = self.load_backing(file_path)?;
+        Ok(backing.to_vec())
     }
 
     #[allow(dead_code)]
     pub fn reload_from_disk(&self, file_path: &str) -> Result<(), String> {
         let key = Self::normalize_key(file_path);
-        let disk_bytes = std::fs::read(file_path)
-            .map_err(|e| format!("Failed reading PDF '{}': {}", file_path, e))?;
+        let backing = open_mmap_or_bytes(file_path)?;
+        self.render_cache.evict_doc(&key);
         let mut guard = self.docs.lock().unwrap();
         guard.insert(
             key,
             WorkingDocument {
                 canonical_key: file_path.to_string(),
-                orig_disk_bytes: Some(disk_bytes.clone()),
-                bytes: disk_bytes,
+                disk_path: Some(file_path.to_string()),
+                orig_disk_bytes: None,
+                backing,
+                is_dirty: false,
                 revision: 1,
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 layout_cache: HashMap::new(),
+                layout_order: VecDeque::new(),
                 objects_cache: HashMap::new(),
+                objects_order: VecDeque::new(),
             },
         );
         Ok(())
@@ -240,20 +674,36 @@ impl PdfWorkspaceEngine {
 
     pub fn register_bytes_for_path(&self, file_path: &str, bytes: Vec<u8>) {
         let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
+        let arc_bytes = Arc::new(bytes.clone());
         let mut guard = self.docs.lock().unwrap();
         guard.insert(
             key,
             WorkingDocument {
                 canonical_key: file_path.to_string(),
-                orig_disk_bytes: Some(bytes.clone()),
-                bytes,
+                disk_path: Some(file_path.to_string()),
+                orig_disk_bytes: Some(bytes),
+                backing: PdfBacking::Bytes(arc_bytes),
+                is_dirty: false,
                 revision: 1,
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 layout_cache: HashMap::new(),
+                layout_order: VecDeque::new(),
                 objects_cache: HashMap::new(),
+                objects_order: VecDeque::new(),
             },
         );
+    }
+
+    fn max_undo_steps_for_len(len: usize) -> usize {
+        if len > 40 * 1024 * 1024 {
+            3
+        } else if len > 10 * 1024 * 1024 {
+            10
+        } else {
+            30
+        }
     }
 
     /// Document-wide mutation (rotate pages, insert/delete/reorder pages, metadata, outlines, labels):
@@ -266,8 +716,8 @@ impl PdfWorkspaceEngine {
     where
         F: FnOnce(&mut LoDocument) -> Result<Option<String>, String>,
     {
-        let current_bytes = self.load_or_sync_from_disk(file_path)?;
-        let mut lo_doc = LoDocument::load_mem(&current_bytes)
+        let (current_backing, _, _) = self.load_backing(file_path)?;
+        let mut lo_doc = LoDocument::load_mem(&current_backing)
             .map_err(|e| format!("Failed parsing PDF in lopdf: {}", e))?;
         let notice = mutator(&mut lo_doc)?;
         let mut new_bytes = Vec::new();
@@ -276,17 +726,22 @@ impl PdfWorkspaceEngine {
             .map_err(|e| format!("Failed serializing mutated PDF: {}", e))?;
 
         let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
         let mut guard = self.docs.lock().unwrap();
         let entry = guard.get_mut(&key).ok_or("Missing working document")?;
-        entry.undo_stack.push(entry.bytes.clone());
-        if entry.undo_stack.len() > 40 {
+        let max_undo = Self::max_undo_steps_for_len(new_bytes.len());
+        entry.undo_stack.push(entry.backing.clone());
+        while entry.undo_stack.len() > max_undo {
             entry.undo_stack.remove(0);
         }
         entry.redo_stack.clear();
-        entry.bytes = new_bytes;
+        entry.backing = PdfBacking::Bytes(Arc::new(new_bytes));
+        entry.is_dirty = true;
         entry.revision += 1;
         entry.layout_cache.clear();
+        entry.layout_order.clear();
         entry.objects_cache.clear();
+        entry.objects_order.clear();
         Ok((
             entry.revision,
             !entry.undo_stack.is_empty(),
@@ -304,30 +759,62 @@ impl PdfWorkspaceEngine {
         incremental: bool,
         compact: bool,
     ) -> Result<(u64, bool), String> {
-        let (working_bytes, orig_disk_bytes) = {
-            let _ = self.load_or_sync_from_disk(file_path)?;
+        let (backing, orig_disk_bytes, disk_path_opt) = {
+            let _ = self.load_backing(file_path)?;
             let key = Self::normalize_key(file_path);
             let guard = self.docs.lock().unwrap();
             let entry = guard.get(&key).ok_or("Missing working document")?;
-            (entry.bytes.clone(), entry.orig_disk_bytes.clone())
+            (
+                entry.backing.clone(),
+                entry.orig_disk_bytes.clone(),
+                entry.disk_path.clone(),
+            )
         };
+        let orig_bytes_owned = match orig_disk_bytes {
+            Some(b) => Some(b),
+            None => disk_path_opt.and_then(|p| std::fs::read(p).ok()),
+        };
+
+        // Release any mmap on target_path before atomic replace on Windows
+        let dst_key = Self::normalize_key(target_path);
+        let src_key = Self::normalize_key(file_path);
+        if dst_key == src_key {
+            let mut guard = self.docs.lock().unwrap();
+            if let Some(entry) = guard.get_mut(&src_key) {
+                if entry.backing.is_mmap() {
+                    entry.backing = PdfBacking::Bytes(Arc::new(backing.to_vec()));
+                }
+            }
+        } else {
+            self.unmap_for_save(target_path);
+        }
+
         let (saved_bytes, used_incremental) = crate::pdf_annots::save_pdf_verified(
-            &working_bytes,
-            orig_disk_bytes.as_deref(),
+            &backing,
+            orig_bytes_owned.as_deref(),
             target_path,
             incremental,
             compact,
         )?;
-        let dst_key = Self::normalize_key(target_path);
-        let src_key = Self::normalize_key(file_path);
+        drop(backing);
+        drop(orig_bytes_owned);
+
+        self.render_cache.evict_doc(&dst_key);
+        let next_backing = open_mmap_or_bytes(target_path)
+            .unwrap_or_else(|_| PdfBacking::Bytes(Arc::new(saved_bytes)));
+
         let mut guard = self.docs.lock().unwrap();
         let next_rev = if dst_key == src_key {
             if let Some(entry) = guard.get_mut(&src_key) {
-                entry.orig_disk_bytes = Some(saved_bytes.clone());
-                entry.bytes = saved_bytes;
+                entry.disk_path = Some(target_path.to_string());
+                entry.orig_disk_bytes = None;
+                entry.backing = next_backing;
+                entry.is_dirty = false;
                 entry.revision += 1;
                 entry.layout_cache.clear();
+                entry.layout_order.clear();
                 entry.objects_cache.clear();
+                entry.objects_order.clear();
                 entry.revision
             } else {
                 1
@@ -337,13 +824,17 @@ impl PdfWorkspaceEngine {
                 dst_key,
                 WorkingDocument {
                     canonical_key: target_path.to_string(),
-                    orig_disk_bytes: Some(saved_bytes.clone()),
-                    bytes: saved_bytes,
+                    disk_path: Some(target_path.to_string()),
+                    orig_disk_bytes: None,
+                    backing: next_backing,
+                    is_dirty: false,
                     revision: 1,
                     undo_stack: Vec::new(),
                     redo_stack: Vec::new(),
                     layout_cache: HashMap::new(),
+                    layout_order: VecDeque::new(),
                     objects_cache: HashMap::new(),
+                    objects_order: VecDeque::new(),
                 },
             );
             1
@@ -360,8 +851,8 @@ impl PdfWorkspaceEngine {
     where
         F: FnOnce(&mut LoDocument) -> Result<Option<String>, String>,
     {
-        let current_bytes = self.load_or_sync_from_disk(file_path)?;
-        let mut lo_doc = LoDocument::load_mem(&current_bytes)
+        let (current_backing, _, _) = self.load_backing(file_path)?;
+        let mut lo_doc = LoDocument::load_mem(&current_backing)
             .map_err(|e| format!("Failed parsing PDF in lopdf: {}", e))?;
         let notice = mutator(&mut lo_doc)?;
         let mut new_bytes = Vec::new();
@@ -370,17 +861,22 @@ impl PdfWorkspaceEngine {
             .map_err(|e| format!("Failed serializing mutated PDF: {}", e))?;
 
         let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
         let mut guard = self.docs.lock().unwrap();
         let entry = guard.get_mut(&key).ok_or("Missing working document")?;
-        entry.undo_stack.push(entry.bytes.clone());
-        if entry.undo_stack.len() > 40 {
+        let max_undo = Self::max_undo_steps_for_len(new_bytes.len());
+        entry.undo_stack.push(entry.backing.clone());
+        while entry.undo_stack.len() > max_undo {
             entry.undo_stack.remove(0);
         }
         entry.redo_stack.clear();
-        entry.bytes = new_bytes;
+        entry.backing = PdfBacking::Bytes(Arc::new(new_bytes));
+        entry.is_dirty = true;
         entry.revision += 1;
         entry.layout_cache.remove(&page);
+        entry.layout_order.retain(|p| *p != page);
         entry.objects_cache.remove(&page);
+        entry.objects_order.retain(|p| *p != page);
         Ok((
             entry.revision,
             !entry.undo_stack.is_empty(),
@@ -391,16 +887,20 @@ impl PdfWorkspaceEngine {
 
     pub fn undo(&self, file_path: &str) -> Result<(Vec<u8>, u64, bool, bool), String> {
         let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
         let mut guard = self.docs.lock().unwrap();
         let entry = guard.get_mut(&key).ok_or("Document not loaded")?;
         let prev = entry.undo_stack.pop().ok_or("Nothing to undo")?;
-        entry.redo_stack.push(entry.bytes.clone());
-        entry.bytes = prev;
+        entry.redo_stack.push(entry.backing.clone());
+        entry.backing = prev;
+        entry.is_dirty = !entry.undo_stack.is_empty();
         entry.revision += 1;
         entry.layout_cache.clear();
+        entry.layout_order.clear();
         entry.objects_cache.clear();
+        entry.objects_order.clear();
         Ok((
-            entry.bytes.clone(),
+            entry.backing.to_vec(),
             entry.revision,
             !entry.undo_stack.is_empty(),
             !entry.redo_stack.is_empty(),
@@ -409,16 +909,20 @@ impl PdfWorkspaceEngine {
 
     pub fn redo(&self, file_path: &str) -> Result<(Vec<u8>, u64, bool, bool), String> {
         let key = Self::normalize_key(file_path);
+        self.render_cache.evict_doc(&key);
         let mut guard = self.docs.lock().unwrap();
         let entry = guard.get_mut(&key).ok_or("Document not loaded")?;
         let next = entry.redo_stack.pop().ok_or("Nothing to redo")?;
-        entry.undo_stack.push(entry.bytes.clone());
-        entry.bytes = next;
+        entry.undo_stack.push(entry.backing.clone());
+        entry.backing = next;
+        entry.is_dirty = true;
         entry.revision += 1;
         entry.layout_cache.clear();
+        entry.layout_order.clear();
         entry.objects_cache.clear();
+        entry.objects_order.clear();
         Ok((
-            entry.bytes.clone(),
+            entry.backing.to_vec(),
             entry.revision,
             !entry.undo_stack.is_empty(),
             !entry.redo_stack.is_empty(),
@@ -441,14 +945,21 @@ impl PdfWorkspaceEngine {
             }
         }
 
-        let bytes = self.load_or_sync_from_disk(file_path)?;
-        let lo_doc = LoDocument::load_mem(&bytes)
+        let (backing, _, _) = self.load_backing(file_path)?;
+        let lo_doc = LoDocument::load_mem(&backing)
             .map_err(|e| format!("Failed parsing PDF objects: {}", e))?;
         let parsed = Arc::new(parse_page_objects(&lo_doc, page - 1)?);
 
         let mut guard = self.docs.lock().unwrap();
         if let Some(doc) = guard.get_mut(&key) {
+            doc.objects_order.retain(|p| *p != page);
+            doc.objects_order.push_back(page);
             doc.objects_cache.insert(page, parsed.clone());
+            while doc.objects_order.len() > MAX_PAGE_CACHE_PER_DOC {
+                if let Some(ev) = doc.objects_order.pop_front() {
+                    doc.objects_cache.remove(&ev);
+                }
+            }
         }
         Ok(parsed)
     }
@@ -465,10 +976,15 @@ impl PdfWorkspaceEngine {
             }
         }
 
-        let bytes = self.load_or_sync_from_disk(file_path)?;
-        let objs = self.get_objects(file_path, page).ok();
+        let (backing, _, _) = self.load_backing(file_path)?;
+        let backing_len = backing.len();
+        let objs = if backing_len <= LARGE_DOC_BYTES_THRESHOLD {
+            self.get_objects(file_path, page).ok()
+        } else {
+            None
+        };
         let layout = Arc::new(extract_page_layout_from_bytes(
-            &bytes,
+            &backing,
             page,
             objs.as_deref(),
         )?);
@@ -477,12 +993,19 @@ impl PdfWorkspaceEngine {
         {
             let mut guard = self.docs.lock().unwrap();
             if let Some(doc) = guard.get_mut(&key) {
+                doc.layout_order.retain(|p| *p != page);
+                doc.layout_order.push_back(page);
                 doc.layout_cache.insert(page, layout.clone());
+                while doc.layout_order.len() > MAX_PAGE_CACHE_PER_DOC {
+                    if let Some(ev) = doc.layout_order.pop_front() {
+                        doc.layout_cache.remove(&ev);
+                    }
+                }
             }
         }
 
-        // Lazy background prefetch for next page to keep scrolling snappy
-        if page < num_pages {
+        // Only prefetch next page layout automatically for normal-sized files
+        if page < num_pages && backing_len <= LARGE_DOC_BYTES_THRESHOLD {
             let next_page = page + 1;
             let engine_clone = self.clone();
             let path_clone = file_path.to_string();

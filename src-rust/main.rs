@@ -17,8 +17,10 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Read as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tao::{
@@ -226,6 +228,201 @@ enum UserEvent {
 struct PathPayload {
     file_path: String,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnregisterStreamPayload {
+    file_path: Option<String>,
+    id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RustRenderPagePayload {
+    file_path: String,
+    page: usize,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    rotation: i32,
+    tile: Option<[i32; 4]>,
+    #[serde(default)]
+    high_quality: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundJobStartPayload {
+    kind: String, // "combine" | "split" | "extract" | "compress"
+    file_path: Option<String>,
+    paths: Option<Vec<String>>,
+    pages: Option<Vec<usize>>,
+    page_range: Option<String>,
+    output_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JobIdPayload {
+    job_id: String,
+}
+
+#[derive(Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JobProgressSnapshot {
+    job_id: String,
+    kind: String,
+    status: String, // "running" | "done" | "error" | "cancelled"
+    progress: u32,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reduction_pct: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extracted_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+struct JobEntry {
+    snap: JobProgressSnapshot,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Default)]
+struct BackgroundJobRegistry {
+    next_id: Arc<AtomicU64>,
+    jobs: Arc<Mutex<HashMap<String, JobEntry>>>,
+}
+
+impl BackgroundJobRegistry {
+    fn new() -> Self {
+        Self {
+            next_id: Arc::new(AtomicU64::new(1)),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn create(&self, kind: &str, msg: &str) -> (String, Arc<AtomicBool>) {
+        let id = format!("job_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let snap = JobProgressSnapshot {
+            job_id: id.clone(),
+            kind: kind.to_string(),
+            status: "running".to_string(),
+            progress: 5,
+            message: msg.to_string(),
+            ..Default::default()
+        };
+        let mut g = self.jobs.lock().unwrap();
+        // Prune finished jobs beyond 24
+        if g.len() > 24 {
+            let done_ids: Vec<String> = g
+                .iter()
+                .filter(|(_, e)| e.snap.status != "running")
+                .map(|(k, _)| k.clone())
+                .take(12)
+                .collect();
+            for k in done_ids {
+                g.remove(&k);
+            }
+        }
+        g.insert(
+            id.clone(),
+            JobEntry {
+                snap,
+                cancelled: cancelled.clone(),
+            },
+        );
+        (id, cancelled)
+    }
+
+    fn update<F>(&self, id: &str, f: F)
+    where
+        F: FnOnce(&mut JobProgressSnapshot),
+    {
+        if let Some(entry) = self.jobs.lock().unwrap().get_mut(id) {
+            f(&mut entry.snap);
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<JobProgressSnapshot> {
+        self.jobs.lock().unwrap().get(id).map(|e| e.snap.clone())
+    }
+
+    fn cancel(&self, id: &str) -> bool {
+        if let Some(entry) = self.jobs.lock().unwrap().get_mut(id) {
+            entry.cancelled.store(true, Ordering::SeqCst);
+            if entry.snap.status == "running" {
+                entry.snap.status = "cancelled".to_string();
+                entry.snap.message = "Operation cancelled".to_string();
+            }
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Clone, Default)]
+struct FileStreamRegistry {
+    next_id: Arc<AtomicU64>,
+    id_to_path: Arc<Mutex<HashMap<String, String>>>,
+    path_to_id: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl FileStreamRegistry {
+    fn new() -> Self {
+        Self {
+            next_id: Arc::new(AtomicU64::new(1)),
+            id_to_path: Arc::new(Mutex::new(HashMap::new())),
+            path_to_id: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn register(&self, file_path: &str) -> String {
+        let norm = PdfWorkspaceEngine::normalize_key(file_path);
+        {
+            let p2i = self.path_to_id.lock().unwrap();
+            if let Some(id) = p2i.get(&norm) {
+                return id.clone();
+            }
+        }
+        let id = format!("doc_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.path_to_id.lock().unwrap().insert(norm, id.clone());
+        self.id_to_path
+            .lock()
+            .unwrap()
+            .insert(id.clone(), file_path.to_string());
+        id
+    }
+
+    fn resolve(&self, id: &str) -> Option<String> {
+        self.id_to_path.lock().unwrap().get(id).cloned()
+    }
+
+    fn unregister_by_path(&self, file_path: &str) {
+        let norm = PdfWorkspaceEngine::normalize_key(file_path);
+        if let Some(id) = self.path_to_id.lock().unwrap().remove(&norm) {
+            self.id_to_path.lock().unwrap().remove(&id);
+        }
+    }
+
+    fn unregister_by_id(&self, id: &str) -> Option<String> {
+        if let Some(fp) = self.id_to_path.lock().unwrap().remove(id) {
+            let norm = PdfWorkspaceEngine::normalize_key(&fp);
+            self.path_to_id.lock().unwrap().remove(&norm);
+            return Some(fp);
+        }
+        None
+    }
+}
+
+use serde::Serialize;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -826,7 +1023,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.2.3';
+      return '1.2.4';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -910,6 +1107,39 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
       });
       if (!res.ok) throw new Error('Failed to fetch working PDF bytes');
       return await res.arrayBuffer();
+    },
+    registerFileStream: async function (filePath) {
+      return await apiPostJson('/file/register', { filePath: filePath });
+    },
+    unregisterFileStream: async function (filePath) {
+      return await apiPostJson('/file/unregister', { filePath: filePath });
+    },
+    suspendFileStream: async function (filePath) {
+      return await apiPostJson('/file/suspend', { filePath: filePath });
+    },
+    renderRustPagePng: async function (payload) {
+      const res = await fetch('/__rust_api__/render/page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(txt || 'Rust PDFium page render failed');
+      }
+      return await res.arrayBuffer();
+    },
+    startBackgroundJob: async function (payload) {
+      return await apiPostJson('/jobs/start', payload);
+    },
+    getBackgroundJobStatus: async function (jobId) {
+      return await apiPostJson('/jobs/status', { jobId: jobId });
+    },
+    cancelBackgroundJob: async function (jobId) {
+      return await apiPostJson('/jobs/cancel', { jobId: jobId });
+    },
+    getRustMemoryStats: async function () {
+      return await apiPostJson('/render/stats', {});
     },
     listSystemFonts: async function () {
       return await apiPostJson('/acrobat/listFonts', {});
@@ -1066,6 +1296,38 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
 })();
 "#;
 
+fn parse_byte_range(range_header: Option<&str>, total_len: u64) -> Option<(u64, u64)> {
+    let hdr = range_header?.trim();
+    let spec = hdr.strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (a, b) = spec.split_once('-')?;
+    if total_len == 0 {
+        return None;
+    }
+    if a.is_empty() {
+        let suffix: u64 = b.trim().parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let start = total_len.saturating_sub(suffix);
+        return Some((start, total_len - 1));
+    }
+    let start: u64 = a.trim().parse().ok()?;
+    if start >= total_len {
+        return None;
+    }
+    let end = if b.trim().is_empty() {
+        // Cap open-ended range chunks to 1 MB so wry never sends 300 MB at once
+        start.saturating_add(1024 * 1024 - 1).min(total_len - 1)
+    } else {
+        b.trim().parse::<u64>().ok()?.min(total_len - 1)
+    };
+    if end < start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
 fn handle_api_request(
     uri_path: &str,
     query: Option<&str>,
@@ -1074,6 +1336,8 @@ fn handle_api_request(
     pending_boot_open_files: Arc<Mutex<Vec<String>>>,
     webview_ready: Arc<AtomicBool>,
     pdf_workspace: PdfWorkspaceEngine,
+    stream_registry: FileStreamRegistry,
+    job_registry: BackgroundJobRegistry,
     responder: RequestAsyncResponder,
 ) {
     match uri_path {
@@ -1098,6 +1362,399 @@ fn handle_api_request(
                 let res = dialogs::save_file_dialog(default_name.as_deref());
                 responder.respond(json_response(StatusCode::OK, &res));
             });
+        }
+        "/__rust_api__/file/register" => {
+            let payload: Result<PathPayload, _> = serde_json::from_slice(&body);
+            match payload {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    let reg = stream_registry.clone();
+                    thread::spawn(move || {
+                        let meta = match fs::metadata(&p.file_path) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                responder.respond(json_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &json!({ "ok": false, "error": format!("Cannot access file: {}", e) }),
+                                ));
+                                return;
+                            }
+                        };
+                        let size = meta.len();
+                        if size < 8 {
+                            responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": "File is empty or corrupted (too small)" }),
+                            ));
+                            return;
+                        }
+                        if size > 2_000_000_000 {
+                            responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": "File exceeds 2 GB limit" }),
+                            ));
+                            return;
+                        }
+                        // Quick %PDF- magic validation in first 1024 bytes without loading file
+                        let mut head = [0u8; 1024];
+                        let header_ok = match fs::File::open(&p.file_path) {
+                            Ok(mut f) => {
+                                let n = f.read(&mut head).unwrap_or(0);
+                                head[..n].windows(5).any(|w| w == b"%PDF-")
+                            }
+                            Err(e) => {
+                                responder.respond(json_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &json!({ "ok": false, "error": format!("Failed to open PDF: {}", e) }),
+                                ));
+                                return;
+                            }
+                        };
+                        if !header_ok {
+                            responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": "Invalid or corrupted PDF header (%PDF- missing)" }),
+                            ));
+                            return;
+                        }
+                        if let Err(e) = ws.load_backing(&p.file_path) {
+                            responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "ok": false, "error": e }),
+                            ));
+                            return;
+                        }
+                        let id = reg.register(&p.file_path);
+                        let file_name = std::path::Path::new(&p.file_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "document.pdf".to_string());
+                        responder.respond(json_response(
+                            StatusCode::OK,
+                            &json!({
+                                "ok": true,
+                                "id": id,
+                                "url": format!("/file/{}", id),
+                                "size": size,
+                                "fileName": file_name,
+                                "disableAutoFetch": size > 20 * 1024 * 1024,
+                                "heavyHint": size > 80 * 1024 * 1024
+                            }),
+                        ));
+                    });
+                }
+                Err(err) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": err.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/file/unregister" => {
+            if let Ok(p) = serde_json::from_slice::<UnregisterStreamPayload>(&body) {
+                if let Some(fp) = p.file_path {
+                    stream_registry.unregister_by_path(&fp);
+                    pdf_workspace.close_document(&fp);
+                } else if let Some(id) = p.id {
+                    if let Some(fp) = stream_registry.unregister_by_id(&id) {
+                        pdf_workspace.close_document(&fp);
+                    }
+                }
+            }
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
+        "/__rust_api__/file/suspend" => {
+            if let Ok(p) = serde_json::from_slice::<PathPayload>(&body) {
+                pdf_workspace.suspend_document(&p.file_path);
+            }
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
+        "/__rust_api__/render/page" => {
+            match serde_json::from_slice::<RustRenderPagePayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        let tile = p.tile.map(|t| (t[0], t[1], t[2].max(1) as u32, t[3].max(1) as u32));
+                        match ws.render_page_png_cached(
+                            &p.file_path,
+                            p.page,
+                            p.width,
+                            p.height,
+                            p.rotation,
+                            tile,
+                            p.high_quality,
+                        ) {
+                            Ok(png_arc) => {
+                                let resp = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(CONTENT_TYPE, "image/png")
+                                    .header("Access-Control-Allow-Origin", "*")
+                                    .header("Cache-Control", "no-store")
+                                    .body(Cow::Owned((*png_arc).clone()))
+                                    .unwrap();
+                                responder.respond(resp);
+                            }
+                            Err(err) => {
+                                responder.respond(json_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &json!({ "error": err }),
+                                ));
+                            }
+                        }
+                    });
+                }
+                Err(err) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": err.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/render/stats" => {
+            let (entries, bytes) = pdf_workspace.render_cache_stats();
+            responder.respond(json_response(
+                StatusCode::OK,
+                &json!({ "entries": entries, "bytes": bytes }),
+            ));
+        }
+        "/__rust_api__/jobs/start" => {
+            match serde_json::from_slice::<BackgroundJobStartPayload>(&body) {
+                Ok(p) => {
+                    let (job_id, cancel_flag) = job_registry.create(&p.kind, "Starting...");
+                    let jobs = job_registry.clone();
+                    let ws = pdf_workspace.clone();
+                    let jid = job_id.clone();
+                    thread::spawn(move || {
+                        let res: Result<(), String> = (|| {
+                            match p.kind.as_str() {
+                                "combine" => {
+                                    let paths = p.paths.unwrap_or_default();
+                                    let out_path = p.output_path.ok_or("Missing outputPath")?;
+                                    if paths.len() < 2 {
+                                        return Err("Select at least 2 PDF files to combine".into());
+                                    }
+                                    let total = paths.len() as u32;
+                                    let mut out = lopdf::Document::with_version("1.6");
+                                    let pages_id = out.new_object_id();
+                                    let mut new_kids: Vec<lopdf::Object> = Vec::new();
+                                    for (idx, path) in paths.iter().enumerate() {
+                                        if cancel_flag.load(Ordering::Relaxed) {
+                                            return Err("CANCELLED".into());
+                                        }
+                                        jobs.update(&jid, |s| {
+                                            s.progress = 10 + ((idx as u32) * 75 / total.max(1));
+                                            s.message = format!("Merging file {} of {}...", idx + 1, total);
+                                        });
+                                        let src = lopdf::Document::load(path)
+                                            .map_err(|e| format!("Failed opening '{}': {}", path, e))?;
+                                        let src_pages = src.get_pages();
+                                        let mut map = HashMap::new();
+                                        let ordered: std::collections::BTreeMap<_, _> = src_pages.into_iter().collect();
+                                        for (_, src_pid) in ordered {
+                                            if cancel_flag.load(Ordering::Relaxed) {
+                                                return Err("CANCELLED".into());
+                                            }
+                                            if let Some(dst_pid) = pdf_annots::copy_object_recursive(&src, &mut out, src_pid, &mut map) {
+                                                if let Ok(lopdf::Object::Dictionary(ref mut kd)) = out.get_object_mut(dst_pid) {
+                                                    kd.set("Parent", lopdf::Object::Reference(pages_id));
+                                                }
+                                                new_kids.push(lopdf::Object::Reference(dst_pid));
+                                            }
+                                        }
+                                    }
+                                    jobs.update(&jid, |s| {
+                                        s.progress = 90;
+                                        s.message = "Writing combined PDF to disk...".to_string();
+                                    });
+                                    let count = new_kids.len() as i64;
+                                    let mut pages_dict = lopdf::Dictionary::new();
+                                    pages_dict.set("Type", lopdf::Object::Name(b"Pages".to_vec()));
+                                    pages_dict.set("Kids", lopdf::Object::Array(new_kids));
+                                    pages_dict.set("Count", lopdf::Object::Integer(count));
+                                    out.objects.insert(pages_id, lopdf::Object::Dictionary(pages_dict));
+                                    let mut cat = lopdf::Dictionary::new();
+                                    cat.set("Type", lopdf::Object::Name(b"Catalog".to_vec()));
+                                    cat.set("Pages", lopdf::Object::Reference(pages_id));
+                                    let cat_id = out.add_object(lopdf::Object::Dictionary(cat));
+                                    out.trailer.set("Root", lopdf::Object::Reference(cat_id));
+                                    let mut merged_bytes = Vec::new();
+                                    out.save_to(&mut merged_bytes).map_err(|e| format!("Combine save failed: {}", e))?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    ws.unmap_for_save(&out_path);
+                                    pdf_annots::save_pdf_verified(&merged_bytes, None, &out_path, false, true)?;
+                                    jobs.update(&jid, |s| {
+                                        s.status = "done".to_string();
+                                        s.progress = 100;
+                                        s.message = format!("Combined {} pages successfully!", count);
+                                        s.output_path = Some(out_path);
+                                        s.extracted_count = Some(count as usize);
+                                    });
+                                }
+                                "split" => {
+                                    let fp = p.file_path.ok_or("Missing filePath")?;
+                                    let range_str = p.page_range.unwrap_or_else(|| "1".to_string());
+                                    let out_path = p.output_path.ok_or("Missing outputPath")?;
+                                    jobs.update(&jid, |s| {
+                                        s.progress = 20;
+                                        s.message = "Parsing PDF structure...".to_string();
+                                    });
+                                    let (backing, _, _) = ws.load_backing(&fp)?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    let lo = lopdf::Document::load_mem(&backing)
+                                        .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                                    let total_pages = lo.get_pages().len();
+                                    let mut selected: Vec<usize> = Vec::new();
+                                    for part in range_str.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
+                                        if let Some((a, b)) = part.split_once('-') {
+                                            let s0: usize = a.trim().parse().map_err(|_| format!("Invalid range '{}'", part))?;
+                                            let e0: usize = b.trim().parse().map_err(|_| format!("Invalid range '{}'", part))?;
+                                            for pg in s0.min(e0)..=s0.max(e0).min(total_pages) {
+                                                if pg >= 1 && !selected.contains(&pg) {
+                                                    selected.push(pg);
+                                                }
+                                            }
+                                        } else {
+                                            let pg: usize = part.parse().map_err(|_| format!("Invalid page '{}'", part))?;
+                                            if pg >= 1 && pg <= total_pages && !selected.contains(&pg) {
+                                                selected.push(pg);
+                                            }
+                                        }
+                                    }
+                                    if selected.is_empty() {
+                                        return Err("No valid page numbers specified".into());
+                                    }
+                                    jobs.update(&jid, |s| {
+                                        s.progress = 60;
+                                        s.message = format!("Extracting {} page(s)...", selected.len());
+                                    });
+                                    let extracted = pdf_annots::extract_pages_to_bytes(&lo, &selected)?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    ws.unmap_for_save(&out_path);
+                                    pdf_annots::save_pdf_verified(&extracted, None, &out_path, false, true)?;
+                                    let cnt = selected.len();
+                                    jobs.update(&jid, |s| {
+                                        s.status = "done".to_string();
+                                        s.progress = 100;
+                                        s.message = format!("Split {} page(s) successfully!", cnt);
+                                        s.output_path = Some(out_path);
+                                        s.extracted_count = Some(cnt);
+                                    });
+                                }
+                                "extract" => {
+                                    let fp = p.file_path.ok_or("Missing filePath")?;
+                                    let pages = p.pages.unwrap_or_default();
+                                    let out_path = p.output_path.ok_or("Missing outputPath")?;
+                                    jobs.update(&jid, |s| {
+                                        s.progress = 25;
+                                        s.message = "Extracting pages...".to_string();
+                                    });
+                                    let (backing, _, _) = ws.load_backing(&fp)?;
+                                    let lo = lopdf::Document::load_mem(&backing)
+                                        .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                                    let extracted = pdf_annots::extract_pages_to_bytes(&lo, &pages)?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    ws.unmap_for_save(&out_path);
+                                    pdf_annots::save_pdf_verified(&extracted, None, &out_path, false, true)?;
+                                    let cnt = pages.len();
+                                    jobs.update(&jid, |s| {
+                                        s.status = "done".to_string();
+                                        s.progress = 100;
+                                        s.message = format!("Extracted {} page(s)!", cnt);
+                                        s.output_path = Some(out_path);
+                                        s.extracted_count = Some(cnt);
+                                    });
+                                }
+                                "compress" => {
+                                    let fp = p.file_path.ok_or("Missing filePath")?;
+                                    let out_path = p.output_path.ok_or("Missing outputPath")?;
+                                    jobs.update(&jid, |s| {
+                                        s.progress = 25;
+                                        s.message = "Compressing object streams...".to_string();
+                                    });
+                                    let (backing, _, _) = ws.load_backing(&fp)?;
+                                    let orig_len = backing.len() as u64;
+                                    let mut lo = lopdf::Document::load_mem(&backing)
+                                        .map_err(|e| format!("Failed parsing PDF: {}", e))?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    lo.prune_objects();
+                                    lo.delete_zero_length_streams();
+                                    let _ = lo.compress();
+                                    let mut out_bytes = Vec::new();
+                                    lo.save_to(&mut out_bytes)
+                                        .map_err(|e| format!("Compress failed: {}", e))?;
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return Err("CANCELLED".into());
+                                    }
+                                    ws.unmap_for_save(&out_path);
+                                    let (saved, _) = pdf_annots::save_pdf_verified(&out_bytes, None, &out_path, false, true)?;
+                                    let new_len = saved.len() as u64;
+                                    let pct = if orig_len > 0 && new_len < orig_len {
+                                        (((orig_len - new_len) * 100) / orig_len) as u32
+                                    } else {
+                                        0
+                                    };
+                                    jobs.update(&jid, |s| {
+                                        s.status = "done".to_string();
+                                        s.progress = 100;
+                                        s.message = format!("Compressed ({}% smaller)", pct);
+                                        s.output_path = Some(out_path);
+                                        s.original_size = Some(orig_len);
+                                        s.new_size = Some(new_len);
+                                        s.reduction_pct = Some(pct);
+                                    });
+                                }
+                                other => return Err(format!("Unsupported job kind: {}", other)),
+                            }
+                            Ok(())
+                        })();
+                        if let Err(err) = res {
+                            if err == "CANCELLED" || cancel_flag.load(Ordering::Relaxed) {
+                                jobs.update(&jid, |s| {
+                                    s.status = "cancelled".to_string();
+                                    s.message = "Cancelled".to_string();
+                                });
+                            } else {
+                                jobs.update(&jid, |s| {
+                                    s.status = "error".to_string();
+                                    s.error = Some(err.clone());
+                                    s.message = err;
+                                });
+                            }
+                        }
+                    });
+                    responder.respond(json_response(StatusCode::OK, &json!({ "ok": true, "jobId": job_id })));
+                }
+                Err(err) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": err.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/jobs/status" => {
+            if let Ok(p) = serde_json::from_slice::<JobIdPayload>(&body) {
+                if let Some(snap) = job_registry.get(&p.job_id) {
+                    responder.respond(json_response(StatusCode::OK, &snap));
+                    return;
+                }
+            }
+            responder.respond(json_response(
+                StatusCode::NOT_FOUND,
+                &json!({ "status": "error", "error": "Job not found" }),
+            ));
+        }
+        "/__rust_api__/jobs/cancel" => {
+            let ok = serde_json::from_slice::<JobIdPayload>(&body)
+                .map(|p| job_registry.cancel(&p.job_id))
+                .unwrap_or(false);
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
         }
         "/__rust_api__/file/read" => {
             let payload: Result<PathPayload, _> = serde_json::from_slice(&body);
@@ -1153,6 +1810,7 @@ fn handle_api_request(
 
             let ws = pdf_workspace.clone();
             thread::spawn(move || {
+                ws.unmap_for_save(&file_path);
                 let res = pdf_engine::save_pdf_file(&file_path, &body);
                 if res.success {
                     ws.register_bytes_for_path(&file_path, body);
@@ -1244,6 +1902,7 @@ fn handle_api_request(
         "/__rust_api__/store/updateSettings" => {
             if let Ok(partial) = serde_json::from_slice::<PartialAppSettings>(&body) {
                 let updated = store.lock().unwrap().update_settings(partial);
+                pdf_workspace.set_render_budget_mb(updated.memory_budget_mb);
                 responder.respond(json_response(StatusCode::OK, &updated));
             } else {
                 let settings = store.lock().unwrap().get_settings();
@@ -2256,6 +2915,12 @@ fn main() {
         ensure_pdfium_dll_present(&user_data_dir);
     }
     let pdf_workspace = PdfWorkspaceEngine::new();
+    {
+        let init_settings = store.lock().unwrap().get_settings();
+        pdf_workspace.set_render_budget_mb(init_settings.memory_budget_mb);
+    }
+    let stream_registry = FileStreamRegistry::new();
+    let job_registry = BackgroundJobRegistry::new();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -2288,6 +2953,8 @@ fn main() {
     let pending_boot_for_protocol = Arc::clone(&pending_boot_open_files);
     let ready_for_protocol = Arc::clone(&webview_ready);
     let workspace_for_protocol = pdf_workspace.clone();
+    let streams_for_protocol = stream_registry.clone();
+    let jobs_for_protocol = job_registry.clone();
     let proxy_for_ipc = proxy.clone();
     let proxy_for_drop = proxy.clone();
     let proxy_for_close = proxy.clone();
@@ -2359,8 +3026,115 @@ fn main() {
                     Arc::clone(&pending_boot_for_protocol),
                     Arc::clone(&ready_for_protocol),
                     workspace_for_protocol.clone(),
+                    streams_for_protocol.clone(),
+                    jobs_for_protocol.clone(),
                     responder,
                 );
+                return;
+            }
+
+            if let Some(stream_id) = path.strip_prefix("/file/") {
+                let clean_id = stream_id.trim_matches('/');
+                let range_hdr = request
+                    .headers()
+                    .get("range")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let method = request.method().clone();
+                let regs = streams_for_protocol.clone();
+                let ws = workspace_for_protocol.clone();
+
+                if method == http::Method::OPTIONS {
+                    let resp = Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                        .header("Access-Control-Allow-Headers", "Range")
+                        .header("Accept-Ranges", "bytes")
+                        .body(Cow::Borrowed(&b""[..]))
+                        .unwrap();
+                    responder.respond(resp);
+                    return;
+                }
+
+                let id_owned = clean_id.to_string();
+                thread::spawn(move || {
+                    let Some(fp) = regs.resolve(&id_owned) else {
+                        let resp = Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Cow::Borrowed(&b"PDF stream not found"[..]))
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    };
+
+                    let Ok((backing, _, _)) = ws.load_backing(&fp) else {
+                        let resp = Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Cow::Borrowed(&b"PDF backing unavailable"[..]))
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    };
+                    let total_len = backing.len() as u64;
+
+                    if method == http::Method::HEAD {
+                        let resp = Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, "application/pdf")
+                            .header("Accept-Ranges", "bytes")
+                            .header("Content-Length", total_len.to_string())
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
+                            .header("Cache-Control", "no-store")
+                            .body(Cow::Borrowed(&b""[..]))
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    }
+
+                    if let Some(ref rh) = range_hdr {
+                        if let Some((start, end_incl)) = parse_byte_range(Some(rh), total_len) {
+                            let chunk = backing[(start as usize)..=(end_incl as usize)].to_vec();
+                            let chunk_len = chunk.len();
+                            let resp = Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(CONTENT_TYPE, "application/pdf")
+                                .header("Accept-Ranges", "bytes")
+                                .header("Content-Range", format!("bytes {}-{}/{}", start, end_incl, total_len))
+                                .header("Content-Length", chunk_len.to_string())
+                                .header("Access-Control-Allow-Origin", "*")
+                                .header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
+                                .header("Cache-Control", "no-store")
+                                .body(Cow::Owned(chunk))
+                                .unwrap();
+                            responder.respond(resp);
+                            return;
+                        } else {
+                            let resp = Response::builder()
+                                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                .header("Content-Range", format!("bytes */{}", total_len))
+                                .body(Cow::Borrowed(&b""[..]))
+                                .unwrap();
+                            responder.respond(resp);
+                            return;
+                        }
+                    }
+
+                    // Non-range fallback
+                    let bytes = backing.to_vec();
+                    let resp = Response::builder()
+                        .status(StatusCode::OK)
+                        .header(CONTENT_TYPE, "application/pdf")
+                        .header("Accept-Ranges", "bytes")
+                        .header("Content-Length", total_len.to_string())
+                        .header("Access-Control-Allow-Origin", "*")
+                        .header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
+                        .header("Cache-Control", "no-store")
+                        .body(Cow::Owned(bytes))
+                        .unwrap();
+                    responder.respond(resp);
+                });
                 return;
             }
 

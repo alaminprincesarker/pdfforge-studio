@@ -2162,7 +2162,7 @@ pub fn crop_pages_real(
 }
 
 /// Deep-clone all indirect objects referenced by a page into `dst` (for insert_pdf, duplicate, combine).
-fn copy_object_recursive(
+pub fn copy_object_recursive(
     src: &lopdf::Document,
     dst: &mut lopdf::Document,
     id: ObjectId,

@@ -1220,3 +1220,82 @@ fn test_metadata_outlines_pagelabels_combine_extract_and_scanned() {
     let _ = std::fs::remove_file(&second_path);
     let _ = std::fs::remove_file(&final_path);
 }
+
+#[test]
+fn test_large_file_mmap_range_lru_cache_and_png_render() {
+    use crate::pdf_layout::{RustPageRenderCache, RustRenderCacheKey};
+
+    let bytes = build_single_page_pdf(
+        [0, 0, 612, 792],
+        0,
+        text_op(72.0, 700.0, 16.0, [0.0, 0.0, 0.0], "Large File Mmap Range PNG Test"),
+        vec![],
+        false,
+    );
+    let pdf_path = temp_pdf_path("test_mmap_range_render.pdf");
+    std::fs::write(&pdf_path, &bytes).unwrap();
+    let path_str = pdf_path.to_str().unwrap();
+
+    let engine = PdfWorkspaceEngine::new();
+    let (backing, rev, dirty) = engine.load_backing(path_str).expect("load_backing");
+    assert!(backing.is_mmap(), "unedited disk PDF should use Mmap");
+    assert_eq!(rev, 1);
+    assert!(!dirty);
+
+    // Byte range read must match exact disk bytes without full copy
+    let (slice, total, _, _) = engine.read_range(path_str, 0, 7).expect("read_range header");
+    assert_eq!(&slice, &bytes[0..8]);
+    assert_eq!(total as usize, bytes.len());
+
+    // Rust PDFium PNG render + tile render + 16 MP safety cap
+    let png_full = engine
+        .render_page_png_cached(path_str, 1, 612, 792, 0, None, false)
+        .expect("render full PNG");
+    assert_eq!(&png_full[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+    let png_tile = engine
+        .render_page_png_cached(path_str, 1, 2448, 3168, 0, Some((100, 120, 400, 300)), true)
+        .expect("render tile PNG");
+    assert_eq!(&png_tile[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+    let (entries, cached_bytes) = engine.render_cache_stats();
+    assert!(entries >= 2 && cached_bytes > 0);
+
+    // Suspending clears render cache cleanly for that doc
+    engine.suspend_document(path_str);
+    let (entries_after, _) = engine.render_cache_stats();
+    assert_eq!(entries_after, 0);
+
+    // LRU render cache clamps to minimum 64 MB budget
+    let cache = RustPageRenderCache::new(64 * 1024 * 1024);
+    for i in 0..3 {
+        cache.insert(
+            RustRenderCacheKey {
+                doc_key: "d".into(),
+                revision: 1,
+                page: i + 1,
+                width: 100,
+                height: 100,
+                rotation: 0,
+                tile_x: 0,
+                tile_y: 0,
+                tile_w: 100,
+                tile_h: 100,
+            },
+            std::sync::Arc::new(vec![1u8; 30 * 1024 * 1024]),
+        );
+    }
+    let (lru_entries, lru_bytes) = cache.stats();
+    assert!(lru_bytes <= 64 * 1024 * 1024 && lru_entries == 2, "LRU evicted oldest page");
+    cache.clear();
+    assert_eq!(cache.stats(), (0, 0));
+
+    // HTTP range parser validation
+    assert_eq!(crate::parse_byte_range(Some("bytes=0-65535"), 100_000), Some((0, 65535)));
+    assert_eq!(crate::parse_byte_range(Some("bytes=99000-"), 100_000), Some((99000, 99999)));
+    assert_eq!(crate::parse_byte_range(Some("bytes=-512"), 100_000), Some((99488, 99999)));
+    assert_eq!(crate::parse_byte_range(Some("bytes=200000-200100"), 100_000), None);
+
+    engine.close_document(path_str);
+    let _ = std::fs::remove_file(&pdf_path);
+}

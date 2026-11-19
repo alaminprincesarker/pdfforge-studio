@@ -28,6 +28,18 @@ fn default_false() -> bool {
     false
 }
 
+fn default_memory_budget_mb() -> u32 {
+    300
+}
+
+fn default_max_active_docs() -> u32 {
+    2
+}
+
+fn default_render_quality() -> String {
+    "standard".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -43,6 +55,14 @@ pub struct AppSettings {
     pub auto_fit_on_open: bool,
     #[serde(default = "default_false")]
     pub reduce_animations: bool,
+    #[serde(default = "default_memory_budget_mb")]
+    pub memory_budget_mb: u32,
+    #[serde(default = "default_max_active_docs")]
+    pub max_active_docs: u32,
+    #[serde(default = "default_render_quality")]
+    pub render_quality: String,
+    #[serde(default = "default_false")]
+    pub reduce_memory_usage: bool,
 }
 
 impl Default for AppSettings {
@@ -56,6 +76,10 @@ impl Default for AppSettings {
             auto_install_updates: false,
             auto_fit_on_open: true,
             reduce_animations: false,
+            memory_budget_mb: 300,
+            max_active_docs: 2,
+            render_quality: "standard".to_string(),
+            reduce_memory_usage: false,
         }
     }
 }
@@ -71,6 +95,10 @@ pub struct PartialAppSettings {
     pub auto_install_updates: Option<bool>,
     pub auto_fit_on_open: Option<bool>,
     pub reduce_animations: Option<bool>,
+    pub memory_budget_mb: Option<u32>,
+    pub max_active_docs: Option<u32>,
+    pub render_quality: Option<String>,
+    pub reduce_memory_usage: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +218,23 @@ impl AppDataStore {
         }
         if let Some(reduce_anim) = partial.reduce_animations {
             current.reduce_animations = reduce_anim;
+        }
+        if let Some(mb) = partial.memory_budget_mb {
+            current.memory_budget_mb = mb.clamp(100, 2048);
+        }
+        if let Some(max_docs) = partial.max_active_docs {
+            current.max_active_docs = max_docs.clamp(1, 6);
+        }
+        if let Some(rq) = partial.render_quality {
+            let clean = if rq.eq_ignore_ascii_case("high") {
+                "high".to_string()
+            } else {
+                "standard".to_string()
+            };
+            current.render_quality = clean;
+        }
+        if let Some(rmu) = partial.reduce_memory_usage {
+            current.reduce_memory_usage = rmu;
         }
         if let Ok(json) = serde_json::to_string_pretty(&current) {
             let _ = fs::write(&self.settings_file, json);

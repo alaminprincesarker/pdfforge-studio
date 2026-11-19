@@ -1,11 +1,11 @@
 {
-  "version": "1.2.3",
-  "tag": "v1.2.3",
-  "name": "PDFForge Studio v1.2.3 (Native Rust Edition)",
+  "version": "1.2.4",
+  "tag": "v1.2.4",
+  "name": "PDFForge Studio v1.2.4 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.2.3-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.2.4-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "PDFForge Studio v1.2.3: Fixed toolbar dropdown stacking context so Zoom %, Page Fit, Highlight Color, Shapes, Annotation Color, and Export menus always open cleanly above the document viewer."
+  "notes": "PDFForge Studio v1.2.4: Major large-PDF & multi-tab architecture upgrade — memmap2 HTTP Range 206 streaming, page virtualization & 16 MP/tile zoom cap, global LRU bitmap & thumb caches, 2-worker pool, auto tab suspension, chunked search with cancel, Rust pdfium heavy rendering & background combine/split/extract/compress jobs, and memory settings."
 }
