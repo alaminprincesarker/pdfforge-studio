@@ -1,12 +1,12 @@
 {
-  "version": "1.3.3",
-  "tag": "v1.3.3",
-  "name": "PDFForge Studio v1.3.3 (Native Rust Edition)",
+  "version": "1.4.0",
+  "tag": "v1.4.0",
+  "name": "PDFForge Studio v1.4.0 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.3.3-Windows-x64.exe",
-  "macDmgUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases/download/v1.3.3/PDFForge-1.3.3-macOS-Universal.dmg",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.4.0-Windows-x64.exe",
+  "macDmgUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases/download/v1.4.0/PDFForge-1.4.0-macOS-Universal.dmg",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "PDFForge Studio v1.3.3: Fixed large-PDF crash (0xc0000409) caused by non-total-order layout baseline sorting on dense/scanned/OCR documents, added worker-thread panic isolation and diagnostic logging, native PDFium file streaming for layout/OCR inspection, bounded background cache encoding, OCR bridge fix, and RangeTransport retry resilience."
+  "notes": "PDFForge Studio v1.4.0: Fixed large-PDF crash (0xc0000409) caused by non-total-order layout baseline sorting on dense/scanned/OCR documents, added worker-thread panic isolation and diagnostic logging, native PDFium file streaming for layout/OCR inspection, bounded background cache encoding, OCR bridge fix, and RangeTransport retry resilience."
 }
