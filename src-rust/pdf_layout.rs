@@ -1705,6 +1705,7 @@ struct RawExtractedChar {
     is_space: bool,
 }
 
+#[allow(dead_code)]
 pub fn extract_page_layout_from_bytes(
     bytes: &[u8],
     page_num_one: usize,
