@@ -44,7 +44,7 @@ function notifyPressure() {
   const detail = {
     high: state.memoryPressure,
     bufferRadius: state.bufferRadius,
-    message: state.memoryPressure ? "Large file: some pages are paused to save memory" : "",
+    message: "",
   };
   state.pressureListeners.forEach((cb) => {
     try {

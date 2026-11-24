@@ -212,6 +212,16 @@ pub fn discover_tessdata_dirs() -> Vec<PathBuf> {
     }
     candidates.push(PathBuf::from(r"C:\Program Files\Tesseract-OCR\tessdata"));
     candidates.push(PathBuf::from(r"C:\Program Files (x86)\Tesseract-OCR\tessdata"));
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents) = exe.parent().and_then(|d| d.parent()) {
+                candidates.push(contents.join("Resources").join("tessdata"));
+            }
+        }
+        candidates.push(PathBuf::from("/opt/homebrew/share/tessdata"));
+        candidates.push(PathBuf::from("/usr/local/share/tessdata"));
+    }
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -463,9 +473,24 @@ unsafe impl Sync for TessFns {}
 static TESS_API: OnceLock<Result<TessFns, String>> = OnceLock::new();
 
 fn load_tesseract_library() -> Result<TessFns, String> {
-    let bin_dirs = discover_tesseract_bin_dirs();
+    let mut bin_dirs = discover_tesseract_bin_dirs();
+    #[cfg(target_os = "macos")]
+    {
+        bin_dirs.push(PathBuf::from("/opt/homebrew/lib"));
+        bin_dirs.push(PathBuf::from("/usr/local/lib"));
+    }
+    #[cfg(target_os = "windows")]
     let tess_dll_names = ["tesseract55.dll", "tesseract54.dll", "tesseract53.dll", "tesseract50.dll", "libtesseract-5.dll"];
+    #[cfg(target_os = "windows")]
     let lept_dll_names = ["leptonica-1.85.0.dll", "leptonica-1.84.1.dll", "leptonica-1.82.0.dll", "libleptonica-6.dll"];
+    #[cfg(target_os = "macos")]
+    let tess_dll_names = ["libtesseract.5.dylib", "libtesseract.dylib"];
+    #[cfg(target_os = "macos")]
+    let lept_dll_names = ["libleptonica.6.dylib", "libleptonica.dylib"];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let tess_dll_names = ["libtesseract.so.5", "libtesseract.so"];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let lept_dll_names = ["libleptonica.so.6", "libleptonica.so"];
 
     let mut chosen_dir: Option<PathBuf> = None;
     let mut chosen_tess: Option<PathBuf> = None;

@@ -14,6 +14,15 @@ fn main() {
     println!("cargo:rerun-if-changed=src-rust/assets/assets/acrobat-pro.js");
     println!("cargo:rerun-if-changed=src-rust/assets/assets/index-11jbxaY0.js");
     println!("cargo:rerun-if-changed=src-rust/assets/assets/index-ClXAvMiX.css");
+    println!("cargo:rerun-if-changed=src-rust/assets/assets/pdf-perf.js");
+    println!("cargo:rerun-if-changed=src-rust/assets/assets/perf-logger.js");
+    println!("cargo:rerun-if-changed=src-rust/assets/assets/ocr-ui.js");
+
+    // Windows-only PE resource embedding & WebView2Loader static shim.
+    // On macOS / Linux, skip windres and wv2_shim.c cleanly so universal builds succeed.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let obj_path = out_dir.join("wv2_shim.o");
@@ -86,4 +95,3 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
-

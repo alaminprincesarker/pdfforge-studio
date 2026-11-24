@@ -44,6 +44,7 @@ use crate::store::{AppDataStore, FileState, PartialAppSettings, RecentFile, Sess
 #[folder = "src-rust/assets/"]
 struct Assets;
 
+#[cfg(target_os = "windows")]
 pub(crate) const WEBVIEW2_LOADER_BYTES: &[u8] = include_bytes!("WebView2Loader.dll");
 #[cfg(target_os = "windows")]
 pub(crate) const PDFIUM_DLL_BYTES: &[u8] = include_bytes!("pdfium.dll");
@@ -1083,7 +1084,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.3.0';
+      return '1.3.1';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});

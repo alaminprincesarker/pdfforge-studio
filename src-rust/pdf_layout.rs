@@ -128,19 +128,31 @@ static PDFIUM_INSTANCE: OnceLock<Arc<Mutex<Pdfium>>> = OnceLock::new();
 static PDFIUM_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn locate_pdfium_library_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let lib_name = "pdfium.dll";
+    #[cfg(target_os = "macos")]
+    let lib_name = "libpdfium.dylib";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let lib_name = "libpdfium.so";
+
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("pdfium.dll"));
+            candidates.push(dir.join(lib_name));
+            #[cfg(target_os = "macos")]
+            if let Some(contents_dir) = dir.parent() {
+                candidates.push(contents_dir.join("Frameworks").join(lib_name));
+                candidates.push(contents_dir.join("Resources").join(lib_name));
+            }
         }
     }
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        candidates.push(PathBuf::from(appdata).join("pdfforge").join("pdfium.dll"));
+        candidates.push(PathBuf::from(appdata).join("pdfforge").join(lib_name));
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("pdfium.dll"));
-        candidates.push(cwd.join("src-rust").join("pdfium.dll"));
-        candidates.push(cwd.join("release").join("pdfium.dll"));
+        candidates.push(cwd.join(lib_name));
+        candidates.push(cwd.join("src-rust").join(lib_name));
+        candidates.push(cwd.join("release").join(lib_name));
     }
     candidates.into_iter().find(|p| p.exists())
 }

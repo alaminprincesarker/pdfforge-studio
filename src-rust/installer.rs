@@ -162,13 +162,13 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
     let _ = fs::write(&app_ico_path, APP_ICO_BYTES);
     let _ = fs::write(&doc_ico_path, DOC_ICO_BYTES);
     // Ship the WebView2 loader and offline PDFium library next to the installed executable so it always starts offline.
-    let loader_path = install_dir.join("WebView2Loader.dll");
-    let _ = fs::write(&loader_path, crate::WEBVIEW2_LOADER_BYTES);
     strip_zone_identifier(&target_exe);
     strip_zone_identifier(&uninstaller_exe);
-    strip_zone_identifier(&loader_path);
     #[cfg(target_os = "windows")]
     {
+        let loader_path = install_dir.join("WebView2Loader.dll");
+        let _ = fs::write(&loader_path, crate::WEBVIEW2_LOADER_BYTES);
+        strip_zone_identifier(&loader_path);
         let pdfium_path = install_dir.join("pdfium.dll");
         let _ = fs::write(&pdfium_path, crate::PDFIUM_DLL_BYTES);
         strip_zone_identifier(&pdfium_path);
