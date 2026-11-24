@@ -27,7 +27,18 @@ const state = {
   bufferRadius: 2,
   pressureListeners: new Set(),
   statsListeners: new Set(),
+  fileMeta: new Map(), // filePath -> { fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium }
+  enginePerf: new Map(), // tabId -> { pdfjsAvg, pdfiumAvg, preferPdfium }
+  lastScrollAt: 0,
 };
+
+export function markScrollingNow() {
+  state.lastScrollAt = Date.now();
+}
+
+export function isRecentlyScrolling(windowMs = 240) {
+  return Date.now() - state.lastScrollAt < windowMs;
+}
 
 function notifyPressure() {
   const detail = {
@@ -111,10 +122,20 @@ export async function createStreamingSource(filePath, optsOrCb) {
   if (signal && signal.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
-  const { url, size, disableAutoFetch, heavyHint } = reg;
+  const { url, size, disableAutoFetch, heavyHint, fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium } = reg;
   if (!size || size <= 0) {
     throw new Error("PDF file is empty or unreadable (0 bytes).");
   }
+  state.fileMeta.set(filePath, {
+    fileHash: fileHash || "",
+    numPages: numPages || 0,
+    page1Width: page1Width || 0,
+    page1Height: page1Height || 0,
+    isLinearized: !!isLinearized,
+    preferPdfium: !!preferPdfium,
+    size,
+    revision: reg.revision || 1,
+  });
   const chunkBytes = Math.min(65536, size);
   const headCtrl = new AbortController();
   const onAbortHead = () => headCtrl.abort();
@@ -197,8 +218,107 @@ export async function createStreamingSource(filePath, optsOrCb) {
     size,
     disableAutoFetch: !!disableAutoFetch,
     heavyHint: !!heavyHint,
+    preferPdfium: !!preferPdfium,
+    isLinearized: !!isLinearized,
+    fileHash: fileHash || "",
+    numPages: numPages || 0,
+    page1Width: page1Width || 0,
+    page1Height: page1Height || 0,
     reg,
   };
+}
+
+export function getFileMeta(filePath) {
+  return state.fileMeta.get(filePath) || null;
+}
+
+export function shouldUsePdfium(tabId, filePath, fallbackHeavy = false) {
+  const ep = state.enginePerf.get(tabId);
+  if (ep && typeof ep.preferPdfium === "boolean") return ep.preferPdfium;
+  const meta = filePath ? state.fileMeta.get(filePath) : null;
+  if (meta && meta.preferPdfium) return true;
+  return !!fallbackHeavy;
+}
+
+export function recordEngineTiming(tabId, engine, durationMs) {
+  if (!tabId || !Number.isFinite(durationMs)) return;
+  let ep = state.enginePerf.get(tabId);
+  if (!ep) {
+    ep = { pdfjsAvg: null, pdfiumAvg: null, preferPdfium: null, samples: 0 };
+    state.enginePerf.set(tabId, ep);
+  }
+  ep.samples++;
+  if (engine === "pdfjs") {
+    // Skip very first cold worker init sample before judging steady-state PDF.js vs PDFium speed
+    if (ep.samples === 1) return;
+    ep.pdfjsAvg = ep.pdfjsAvg == null ? durationMs : ep.pdfjsAvg * 0.6 + durationMs * 0.4;
+    // Automatically escalate heavy vector/image pages to Rust PDFium if steady-state PDF.js stalls > 280ms
+    if (ep.samples >= 3 && ep.pdfjsAvg > 280) {
+      ep.preferPdfium = true;
+    }
+  } else if (engine === "pdfium") {
+    ep.pdfiumAvg = ep.pdfiumAvg == null ? durationMs : ep.pdfiumAvg * 0.6 + durationMs * 0.4;
+  }
+}
+
+export async function getDiskCachedBitmap(filePath, rev, page, widthPx, rotation = 0, isThumb = false) {
+  if (!filePath || !window.electronAPI || typeof window.electronAPI.getDiskRenderBlob !== "function") {
+    return null;
+  }
+  const meta = state.fileMeta.get(filePath);
+  if (!meta || !meta.fileHash) return null;
+  const zoomBucket = Math.round((Math.max(16, widthPx) + 8) / 16) * 16;
+  try {
+    const blob = await window.electronAPI.getDiskRenderBlob({
+      fileHash: meta.fileHash,
+      revision: rev || meta.revision || 1,
+      page,
+      zoomBucket,
+      rotation: ((rotation % 360) + 360) % 360,
+      isThumb: !!isThumb,
+    });
+    if (!blob || blob.size < 24) return null;
+    return await createImageBitmap(blob);
+  } catch {
+    return null;
+  }
+}
+
+export function putDiskCachedBitmap(filePath, rev, page, canvasOrBmp, widthPx, rotation = 0, isThumb = false) {
+  if (!filePath || !canvasOrBmp || !window.electronAPI || typeof window.electronAPI.putDiskRenderBlob !== "function") {
+    return;
+  }
+  const meta = state.fileMeta.get(filePath);
+  if (!meta || !meta.fileHash) return;
+  const zoomBucket = Math.round((Math.max(16, widthPx) + 8) / 16) * 16;
+  const sendBlob = (blob) => {
+    if (!blob || blob.size < 24) return;
+    window.electronAPI.putDiskRenderBlob(
+      {
+        fileHash: meta.fileHash,
+        revision: rev || meta.revision || 1,
+        page,
+        zoomBucket,
+        rotation: ((rotation % 360) + 360) % 360,
+        isThumb: !!isThumb,
+      },
+      blob
+    );
+  };
+  try {
+    if (typeof OffscreenCanvas !== "undefined" && canvasOrBmp instanceof ImageBitmap) {
+      const oc = new OffscreenCanvas(canvasOrBmp.width, canvasOrBmp.height);
+      const octx = oc.getContext("2d", { alpha: false });
+      if (octx) {
+        octx.drawImage(canvasOrBmp, 0, 0);
+        oc.convertToBlob({ type: "image/png" }).then(sendBlob).catch(() => {});
+        return;
+      }
+    }
+    if (typeof canvasOrBmp.toBlob === "function") {
+      canvasOrBmp.toBlob(sendBlob, "image/png");
+    }
+  } catch {}
 }
 
 // --- LRU Bitmap Cache (Global across tabs, default 300 MB) ---
@@ -277,9 +397,10 @@ function evictBitmapsToLimit(limit) {
   }
 }
 
-export function evictTabBitmaps(tabId) {
+export function evictTabBitmaps(tabId, keepPage = null) {
   for (const [k, item] of state.bitmapCache.entries()) {
     if (item.tabId === tabId) {
+      if (keepPage != null && item.page === keepPage) continue;
       state.bitmapCache.delete(k);
       state.bitmapBytes = Math.max(0, state.bitmapBytes - item.bytes);
       try {
@@ -471,10 +592,11 @@ export function bindTabRuntime(tabId, { loadingTask, pdfDoc, transport, worker, 
   enforceActiveDocLimit();
 }
 
-export async function releaseTabRuntime(tabId, isClose = false) {
+export async function releaseTabRuntime(tabId, isClose = false, keepPage = null) {
   cancelQueuedRenders(tabId);
-  evictTabBitmaps(tabId);
+  evictTabBitmaps(tabId, isClose ? null : keepPage);
   clearThumbsForTab(tabId);
+  if (isClose) state.enginePerf.delete(tabId);
   const rec = state.tabRecords.get(tabId);
   if (!rec) return;
   const docWorker = rec.worker || (rec.loadingTask && rec.loadingTask._worker) || null;
@@ -637,13 +759,54 @@ if (typeof window !== "undefined") {
   }, 5000);
 }
 
-// --- Chunked Non-Blocking Idle Search ---
+// --- Chunked Non-Blocking Idle Search + Persistent Rust Disk Index ---
 export function searchInDocumentChunked(pdfDoc, query, caseSensitive = false, opts = {}) {
-  const { onProgress, onResults, signal } = opts;
+  const { onProgress, onResults, signal, filePath } = opts;
   const term = String(query || "").trim();
   if (!pdfDoc || !term) {
     return Promise.resolve([]);
   }
+  const totalPages = pdfDoc.numPages || 0;
+
+  // Prefer Rust persistent disk-indexed search (zero main-thread blocking, <10ms on repeat searches!)
+  let resolvedPath = filePath || "";
+  if (!resolvedPath) {
+    for (const rec of state.tabRecords.values()) {
+      if (rec.pdfDoc === pdfDoc && rec.filePath) {
+        resolvedPath = rec.filePath;
+        break;
+      }
+    }
+  }
+  if (
+    resolvedPath &&
+    !resolvedPath.startsWith("cache:") &&
+    window.electronAPI &&
+    typeof window.electronAPI.searchIndexed === "function"
+  ) {
+    return window.electronAPI
+      .searchIndexed(resolvedPath, term, !!caseSensitive)
+      .then((res) => {
+        if (signal && signal.aborted) return [];
+        if (res && res.ok && Array.isArray(res.hits)) {
+          const hits = res.hits;
+          if (typeof onProgress === "function") {
+            try { onProgress(res.totalPages || totalPages, res.totalPages || totalPages, hits); } catch {}
+          }
+          if (typeof onResults === "function") {
+            try { onResults(hits); } catch {}
+          }
+          return hits;
+        }
+        return _searchPdfjsChunked(pdfDoc, term, caseSensitive, opts);
+      })
+      .catch(() => _searchPdfjsChunked(pdfDoc, term, caseSensitive, opts));
+  }
+  return _searchPdfjsChunked(pdfDoc, term, caseSensitive, opts);
+}
+
+function _searchPdfjsChunked(pdfDoc, term, caseSensitive = false, opts = {}) {
+  const { onProgress, onResults, signal } = opts;
   const needle = caseSensitive ? term : term.toLowerCase();
   const totalPages = pdfDoc.numPages || 0;
   const results = [];
@@ -767,6 +930,10 @@ export async function runBackgroundJob(payload, opts = {}) {
   }
 }
 
+export function getTabRuntime(tabId) {
+  return state.tabRecords.get(tabId) || null;
+}
+
 const PerfAPI = {
   setConfig,
   getConfig,
@@ -774,6 +941,13 @@ const PerfAPI = {
   getBufferRadius,
   getSharedWorker,
   createStreamingSource,
+  getFileMeta,
+  shouldUsePdfium,
+  recordEngineTiming,
+  getDiskCachedBitmap,
+  putDiskCachedBitmap,
+  markScrollingNow,
+  isRecentlyScrolling,
   getCachedBitmap,
   getAnyPageBitmap,
   putCachedBitmap,
@@ -789,6 +963,7 @@ const PerfAPI = {
   setActiveTab,
   registerTabLifecycle,
   bindTabRuntime,
+  getTabRuntime,
   releaseTabRuntime,
   enforceActiveDocLimit,
   enforceMemoryBudget,

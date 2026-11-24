@@ -1,11 +1,11 @@
 {
-  "version": "1.2.5",
-  "tag": "v1.2.5",
-  "name": "PDFForge Studio v1.2.5 (Native Rust Edition)",
+  "version": "1.3.0",
+  "tag": "v1.3.0",
+  "name": "PDFForge Studio v1.3.0 (Native Rust Edition)",
   "publisher": "Md. Alamin",
   "contact": "alaminprincesarker@gmail.com",
   "repository": "https://github.com/alaminprincesarker/pdfforge-studio",
-  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.2.5-Windows-x64.exe",
+  "downloadUrl": "https://github.com/alaminprincesarker/pdfforge-studio/raw/main/release/PDFForge-Setup-1.3.0-Windows-x64.exe",
   "releasePageUrl": "https://github.com/alaminprincesarker/pdfforge-studio/releases",
-  "notes": "PDFForge Studio v1.2.5: Fixed black screen on repeated zoom in/out, fixed highlighter color selection & fast text/area drag highlighting, and fixed Invalid PDF structure error when reloading edited/streamed PDFs."
+  "notes": "PDFForge Studio v1.3.0: Added Acrobat-style 100% offline Tesseract 5.5 OCR (scanned page detection, English + Bangla + OSD auto-rotation, deskew/denoise, invisible Unicode text layer) and major performance overhaul (~52ms dark-frame window open, 55-60 FPS virtualized scrolling across 1,000-page & 100MB+ PDFs, fast BMP native PDFium rendering, persistent disk render/search-index cache, 5-12ms repeat search, and built-in Ctrl+Shift+P Performance Monitor)."
 }

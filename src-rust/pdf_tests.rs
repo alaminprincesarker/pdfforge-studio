@@ -1299,3 +1299,366 @@ fn test_large_file_mmap_range_lru_cache_and_png_render() {
     engine.close_document(path_str);
     let _ = std::fs::remove_file(&pdf_path);
 }
+
+fn build_raster_image_pdf(
+    pages_pixels: Vec<(u32, u32, Vec<u8>, i32, Option<&'static str>)>,
+    page_w: f32,
+    page_h: f32,
+) -> Vec<u8> {
+    use lopdf::{Dictionary, Object, Stream};
+    let mut doc = Document::with_version("1.7");
+    let pages_id = doc.new_object_id();
+    let mut page_ids = Vec::new();
+
+    for (iw, ih, gray, pdf_rotate, overlay_text) in pages_pixels {
+        let mut img_dict = Dictionary::new();
+        img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        img_dict.set("Width", Object::Integer(iw as i64));
+        img_dict.set("Height", Object::Integer(ih as i64));
+        img_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        img_dict.set("BitsPerComponent", Object::Integer(8));
+        let mut img_stream = Stream::new(img_dict, gray);
+        let _ = img_stream.compress();
+        let img_id = doc.add_object(Object::Stream(img_stream));
+
+        let mut xobj_dict = Dictionary::new();
+        xobj_dict.set("Im1", Object::Reference(img_id));
+        let mut res_dict = Dictionary::new();
+        res_dict.set("XObject", Object::Dictionary(xobj_dict));
+
+        let mut content_str = format!("q\n{} 0 0 {} 0 0 cm\n/Im1 Do\nQ\n", page_w, page_h);
+        if let Some(txt) = overlay_text {
+            let mut f1 = Dictionary::new();
+            f1.set("Type", Object::Name(b"Font".to_vec()));
+            f1.set("Subtype", Object::Name(b"Type1".to_vec()));
+            f1.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+            let fid = doc.add_object(Object::Dictionary(f1));
+            let mut fd = Dictionary::new();
+            fd.set("F1", Object::Reference(fid));
+            res_dict.set("Font", Object::Dictionary(fd));
+            content_str.push_str(&format!("BT /F1 14 Tf 50 740 Td ({}) Tj ET\n", txt));
+        }
+
+        let mut cstream = Stream::new(Dictionary::new(), content_str.into_bytes());
+        let _ = cstream.compress();
+        let cid = doc.add_object(Object::Stream(cstream));
+
+        let mut page_dict = Dictionary::new();
+        page_dict.set("Type", Object::Name(b"Page".to_vec()));
+        page_dict.set("Parent", Object::Reference(pages_id));
+        page_dict.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(page_w as i64),
+                Object::Integer(page_h as i64),
+            ]),
+        );
+        if pdf_rotate != 0 {
+            page_dict.set("Rotate", Object::Integer(pdf_rotate as i64));
+        }
+        page_dict.set("Resources", Object::Dictionary(res_dict));
+        page_dict.set("Contents", Object::Reference(cid));
+        let pid = doc.add_object(Object::Dictionary(page_dict));
+        page_ids.push(Object::Reference(pid));
+    }
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Count", Object::Integer(page_ids.len() as i64));
+    pages_dict.set("Kids", Object::Array(page_ids));
+    doc.objects.insert(pages_id, Object::Dictionary(pages_dict));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let cat_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(cat_id));
+
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn test_ocr_clean_skewed_noisy_mixed_rotated_and_bangla() {
+    use crate::ocr::{
+        inspect_page_scan_status_bytes, list_available_languages, render_page_for_ocr_from_bytes,
+        rotate_gray_arbitrary_white, rotate_gray_cw, run_ocr_on_grayscale, write_ocr_results_into_pdf,
+    };
+    use crate::pdf_layout::get_pdfium;
+
+    let langs = list_available_languages();
+    assert!(langs.available, "Tesseract DLL must load: {:?}", langs.engine_error);
+    assert!(langs.languages.iter().any(|l| l.code == "eng"), "eng.traineddata missing");
+    assert!(langs.languages.iter().any(|l| l.code == "ben"), "ben.traineddata missing");
+
+    // 1. Render a clean source English document to grayscale image -> build scanned-only PDF (0 vector chars)
+    let mut src_en_ops = Vec::new();
+    src_en_ops.extend(text_op(64.0, 680.0, 22.0, [0.0, 0.0, 0.0], "INVOICE SUMMARY REPORT 2026"));
+    src_en_ops.extend(text_op(64.0, 620.0, 15.0, [0.0, 0.0, 0.0], "Quarterly revenue rose sharply across desktop tools."));
+    src_en_ops.extend(text_op(64.0, 580.0, 15.0, [0.0, 0.0, 0.0], "Total verified orders reached forty two thousand units."));
+    let src_en_pdf = build_single_page_pdf([0, 0, 612, 792], 0, src_en_ops, vec![], false);
+    let (clean_gray, gw, gh, vpw, vph) =
+        render_page_for_ocr_from_bytes(&src_en_pdf, 1, 300).expect("render clean scan");
+
+    // Clean English scan PDF -> detect as scanned -> OCR at 150, 300, 600 DPI timings
+    let scanned_en_pdf = build_raster_image_pdf(vec![(gw, gh, clean_gray.clone(), 0, None)], vpw, vph);
+    let det = inspect_page_scan_status_bytes(&scanned_en_pdf, "clean.pdf", 1).unwrap();
+    assert!(det.is_scanned, "clean raster PDF must be detected as scanned (cov={})", det.image_coverage);
+    assert_eq!(det.non_whitespace_chars, 0);
+
+    for dpi in [150u32, 300u32, 600u32] {
+        let (rg, rw, rh, _, _) = render_page_for_ocr_from_bytes(&scanned_en_pdf, 1, dpi).unwrap();
+        let res = run_ocr_on_grayscale(1, rg, rw, rh, dpi, vpw, vph, "eng").unwrap();
+        let txt: String = res.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        println!("[OCR CLEAN {} DPI] time={}ms conf={:.1}% text={}", dpi, res.duration_ms, res.mean_confidence, txt);
+        assert!(txt.contains("INVOICE") && txt.contains("Quarterly") && txt.contains("orders"), "Failed at {} DPI: {}", dpi, txt);
+    }
+
+    // Write 300 DPI OCR into scanned PDF and verify searchable/selectable text in PDFium + unchanged visual image
+    let res_300 = run_ocr_on_grayscale(1, clean_gray.clone(), gw, gh, 300, vpw, vph, "eng").unwrap();
+    let searchable_en_pdf =
+        write_ocr_results_into_pdf(&scanned_en_pdf, &[res_300], "searchable_image", 0).unwrap();
+    let pdfium = get_pdfium().unwrap();
+    {
+        let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+        let pdoc = guard.load_pdf_from_byte_slice(&searchable_en_pdf, None).unwrap();
+        let extracted = pdoc.pages().get(0).unwrap().text().unwrap().all();
+        println!("[OCR PDFium extracted] {}", extracted);
+        assert!(extracted.contains("INVOICE") && extracted.contains("Quarterly") && extracted.contains("revenue"));
+    }
+
+    // After OCR, page is no longer "scanned (no text)"!
+    let det_after = inspect_page_scan_status_bytes(&searchable_en_pdf, "clean.pdf", 1).unwrap();
+    assert!(!det_after.is_scanned && det_after.has_text, "Post-OCR PDF must report has_text=true");
+
+    // 2. Skewed scan (~5.0 deg skew)
+    let skewed_gray = rotate_gray_arbitrary_white(&clean_gray, gw, gh, 5.0);
+    let skewed_res = run_ocr_on_grayscale(1, skewed_gray, gw, gh, 300, vpw, vph, "eng").unwrap();
+    let skewed_txt: String = skewed_res.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    println!("[OCR SKEWED] detected_skew={:.2}deg time={}ms conf={:.1}% text={}", skewed_res.skew_deg, skewed_res.duration_ms, skewed_res.mean_confidence, skewed_txt);
+    assert!(skewed_res.skew_deg.abs() > 3.5, "Should detect ~5 deg skew, got {}", skewed_res.skew_deg);
+    assert!(skewed_txt.contains("INVOICE") && skewed_txt.contains("Quarterly"), "Skewed OCR missed words: {}", skewed_txt);
+
+    // 3. Low-quality phone photo (uneven dark lighting shadow gradient + salt/pepper grain)
+    let mut noisy_gray = clean_gray.clone();
+    for y in 0..(gh as usize) {
+        for x in 0..(gw as usize) {
+            let idx = y * (gw as usize) + x;
+            let shade = 0.42 + 0.52 * ((x as f32 / gw as f32) * 0.6 + (y as f32 / gh as f32) * 0.4);
+            let mut v = (noisy_gray[idx] as f32) * shade;
+            if ((x * 73 + y * 139) % 197) == 0 {
+                v = 25.0; // salt/pepper dark speckle
+            }
+            noisy_gray[idx] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
+    let noisy_res = run_ocr_on_grayscale(1, noisy_gray, gw, gh, 300, vpw, vph, "eng").unwrap();
+    let noisy_txt: String = noisy_res.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    println!("[OCR LOW-QUALITY PHOTO] time={}ms conf={:.1}% text={}", noisy_res.duration_ms, noisy_res.mean_confidence, noisy_txt);
+    assert!(noisy_txt.contains("INVOICE") && noisy_txt.contains("orders"), "Noisy photo OCR failed: {}", noisy_txt);
+
+    // 4. Rotated page: (a) PDF /Rotate = 90 + (b) Sideways OSD image rotated 90 deg CW with /Rotate = 0
+    let (sideways_gray, sw_w, sw_h) = rotate_gray_cw(&clean_gray, gw, gh, 90);
+    let sideways_res = run_ocr_on_grayscale(1, sideways_gray, sw_w, sw_h, 300, vph, vpw, "eng").unwrap();
+    let sideways_txt: String = sideways_res.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    println!("[OCR SIDEWAYS OSD] osd_cw={}deg conf={:.1}% text={}", sideways_res.osd_cw_deg, sideways_res.mean_confidence, sideways_txt);
+    assert!(sideways_txt.contains("INVOICE") || sideways_txt.contains("SUMMARY"), "Sideways OSD OCR failed: {}", sideways_txt);
+
+    let rot90_pdf = build_raster_image_pdf(vec![(gw, gh, clean_gray.clone(), 90, None)], 612.0, 792.0);
+    let (rg90, rw90, rh90, vp90w, vp90h) = render_page_for_ocr_from_bytes(&rot90_pdf, 1, 300).unwrap();
+    let rot90_res = run_ocr_on_grayscale(1, rg90, rw90, rh90, 300, vp90w, vp90h, "eng").unwrap();
+    let rot90_out = write_ocr_results_into_pdf(&rot90_pdf, &[rot90_res], "searchable_image_exact", 0).unwrap();
+    {
+        let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+        let pdoc = guard.load_pdf_from_byte_slice(&rot90_out, None).unwrap();
+        let ex90: String = pdoc
+            .pages()
+            .get(0)
+            .unwrap()
+            .text()
+            .unwrap()
+            .chars()
+            .iter()
+            .filter_map(|c| c.unicode_char())
+            .collect();
+        println!("[OCR PDF /Rotate 90] {}", ex90);
+        assert!(ex90.contains("INVOICE") && ex90.contains("SUMMARY") && ex90.contains("Total"));
+    }
+
+    // 5. Mixed page: image covering page + existing text -> must NOT flag as scanned
+    let mixed_pdf = build_raster_image_pdf(vec![(gw, gh, clean_gray.clone(), 0, Some("Existing Vector Header"))], vpw, vph);
+    let mixed_det = inspect_page_scan_status_bytes(&mixed_pdf, "mixed.pdf", 1).unwrap();
+    assert!(!mixed_det.is_scanned && mixed_det.has_text, "Mixed page must report has_text=true, is_scanned=false");
+
+    // 6. Bangla scan: render real Bangla PDF text to raster image -> OCR with 'ben' -> embed Unicode ToUnicode CMap -> verify PDFium copy!
+    let mut ben_src = build_single_page_pdf([0, 0, 612, 792], 0, Vec::new(), vec![], false);
+    {
+        let mut lo = Document::load_mem(&ben_src).unwrap();
+        let _pid = *lo.get_pages().get(&1).unwrap();
+        let req = crate::pdf_objects::EditTextCommitRequest {
+            page: 1,
+            orig_bbox_vp: [60.0, 120.0, 420.0, 40.0],
+            new_bbox_vp: [60.0, 120.0, 420.0, 40.0],
+            text: "বাংলাদেশ আমার সোনার বাংলা".to_string(),
+            original_font: "".into(),
+            font_family: "Noto Sans Bengali".into(),
+            font_size: 26.0,
+            color: "#000000".into(),
+            bold: false,
+            italic: false,
+            align: "left".into(),
+            line_spacing: 1.25,
+            bullets: false,
+            bg_color: None,
+            delete_block: None,
+        };
+        crate::pdf_objects::commit_edit_text_block(&mut lo, &req).unwrap();
+        ben_src.clear();
+        lo.save_to(&mut ben_src).unwrap();
+    }
+    let (ben_gray, bw, bh, bvpw, bvph) = render_page_for_ocr_from_bytes(&ben_src, 1, 300).unwrap();
+    let scanned_ben_pdf = build_raster_image_pdf(vec![(bw, bh, ben_gray.clone(), 0, None)], bvpw, bvph);
+    let ben_res = run_ocr_on_grayscale(1, ben_gray, bw, bh, 300, bvpw, bvph, "ben").unwrap();
+    let ben_txt: String = ben_res.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    println!("[OCR BANGLA] time={}ms conf={:.1}% text={}", ben_res.duration_ms, ben_res.mean_confidence, ben_txt);
+    assert!(ben_txt.chars().any(|c| ('\u{0980}'..='\u{09FF}').contains(&c)), "Bangla OCR produced no Bengali script: {}", ben_txt);
+    let searchable_ben_pdf = write_ocr_results_into_pdf(&scanned_ben_pdf, &[ben_res], "searchable_image", 0).unwrap();
+    {
+        let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
+        let pdoc = guard.load_pdf_from_byte_slice(&searchable_ben_pdf, None).unwrap();
+        let ex_ben = pdoc.pages().get(0).unwrap().text().unwrap().all();
+        println!("[OCR BANGLA PDFium extracted] {}", ex_ben);
+        assert!(ex_ben.chars().any(|c| ('\u{0980}'..='\u{09FF}').contains(&c)), "ToUnicode CMap failed to roundtrip Bangla in PDFium");
+    }
+}
+
+#[test]
+fn test_ocr_200_page_job_pipeline_and_undo() {
+    use crate::ocr::{OcrJobManager, OcrStartRequest};
+
+    // Build a realistic 200-page scanned PDF (compact 150dpi-equivalent image frames + shared structure)
+    let src_ops = text_op(72.0, 700.0, 18.0, [0.0, 0.0, 0.0], "Document Archive Page Reference");
+    let src_pdf = build_single_page_pdf([0, 0, 612, 792], 0, src_ops, vec![], false);
+    let (gray, gw, gh, vpw, vph) =
+        crate::ocr::render_page_for_ocr_from_bytes(&src_pdf, 1, 150).unwrap();
+
+    let pages_vec: Vec<(u32, u32, Vec<u8>, i32, Option<&'static str>)> = (0..200)
+        .map(|i| {
+            let txt = if i == 199 { Some("Existing Text Page 200") } else { None };
+            (gw, gh, gray.clone(), 0, txt)
+        })
+        .collect();
+    let large_scan_pdf = build_raster_image_pdf(pages_vec, vpw, vph);
+    let pdf_path = temp_pdf_path("test_ocr_200pages.pdf");
+    std::fs::write(&pdf_path, &large_scan_pdf).unwrap();
+    let path_str = pdf_path.to_str().unwrap().to_string();
+
+    let ws = std::sync::Arc::new(PdfWorkspaceEngine::new());
+    let mgr = OcrJobManager::new();
+    let page_nums: Vec<usize> = (1..=200).collect();
+
+    let range_info = crate::ocr::inspect_pages_range_status(&ws, &path_str, &page_nums).unwrap();
+    assert_eq!(range_info.total_pages, 200);
+    assert_eq!(range_info.scanned_pages.len(), 199);
+    assert_eq!(range_info.text_pages, vec![200]);
+
+    let job_id = mgr
+        .start_job(
+            ws.clone(),
+            OcrStartRequest {
+                file_path: path_str.clone(),
+                pages: page_nums,
+                language: "eng".into(),
+                secondary_language: None,
+                output_mode: "searchable_image".into(),
+                downsample_dpi: 150,
+                rerun_text_pages: false,
+            },
+        )
+        .expect("start 200-page OCR job");
+
+    let snap = loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let st = mgr.get_status(&job_id).unwrap();
+        if st.status != "running" {
+            break st;
+        }
+    };
+    println!(
+        "[OCR 200-PAGE RESULT] status={} recognized={} skipped={} avg_ms_per_page={} conf={:.1}%",
+        snap.status, snap.recognized_pages, snap.skipped_pages, snap.avg_ms_per_page, snap.mean_confidence
+    );
+    assert_eq!(snap.status, "done");
+    assert_eq!(snap.recognized_pages, 199);
+    assert_eq!(snap.skipped_pages, 1);
+    assert!(snap.can_undo.unwrap_or(false));
+
+    // Verify Undo restores 0-text page 1 cleanly
+    let (_, undo_rev, can_undo_after, _) = ws.undo(&path_str).unwrap();
+    assert!(undo_rev > snap.revision.unwrap());
+    assert!(!can_undo_after);
+    let post_undo_bytes = ws.get_working_bytes(&path_str).unwrap();
+    let post_undo_det = crate::ocr::inspect_page_scan_status_bytes(&post_undo_bytes, &path_str, 1).unwrap();
+    assert!(post_undo_det.is_scanned, "Undo must restore original image-only page");
+
+    ws.close_document(&path_str);
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[test]
+fn test_fast_bmp_disk_cache_and_indexed_search() {
+    use crate::disk_cache::{
+        compute_file_hash, read_cached_render, search_file_indexed, write_cached_render_async,
+    };
+    use crate::pdf_layout::encode_bgra_to_bmp_fast;
+
+    // 1. Verify top-down 32-bit BGRA BMP fast serializer
+    let bgra = vec![200u8; 64 * 48 * 4];
+    let bmp = encode_bgra_to_bmp_fast(64, 48, &bgra).expect("bmp encode");
+    assert_eq!(&bmp[0..2], b"BM");
+    assert_eq!(bmp.len(), 54 + 64 * 48 * 4);
+
+    // 2. Verify fast PDF probe + disk-cached render + instant repeat indexed search
+    let mut ops = Vec::new();
+    ops.extend(text_op(72.0, 700.0, 16.0, [0.0, 0.0, 0.0], "Indexed Search Cache Verification Token_9942"));
+    let pdf_bytes = build_single_page_pdf([0, 0, 612, 792], 0, ops, vec![], false);
+    let pdf_path = temp_pdf_path("test_perf_disk_cache.pdf");
+    std::fs::write(&pdf_path, &pdf_bytes).unwrap();
+    let path_str = pdf_path.to_str().unwrap();
+
+    let ws = PdfWorkspaceEngine::new();
+    let probe = ws
+        .probe_file_fast(path_str, &pdf_bytes[..pdf_bytes.len().min(1024)], pdf_bytes.len() as u64)
+        .expect("probe_file_fast");
+    assert_eq!(probe.num_pages, 1);
+    assert!((probe.page1_width - 612.0).abs() < 2.0);
+    assert!(!probe.file_hash.is_empty());
+
+    let (fast_bytes, mime) = ws
+        .render_page_fast_cached(path_str, 1, 306, 396, 0, None, false, false)
+        .expect("render_page_fast_cached");
+    assert!(mime == "image/bmp" || mime == "image/png");
+    assert!(fast_bytes.len() > 100);
+
+    // Disk cache roundtrip
+    let fh = compute_file_hash(path_str);
+    write_cached_render_async(fh.clone(), 1, 1, 128, 0, true, vec![137u8; 64]);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let hit = read_cached_render(&fh, 1, 1, 128, 0, true);
+    assert!(hit.is_some());
+
+    // First search builds disk/RAM index; second search hits cache in <5ms
+    let s1 = search_file_indexed(&ws, path_str, "Token_9942", false).expect("search 1");
+    assert_eq!(s1.hits.len(), 1);
+    assert_eq!(s1.hits[0].page_number, 1);
+    let s2 = search_file_indexed(&ws, path_str, "Token_9942", false).expect("search 2");
+    assert!(s2.cache_hit);
+    assert_eq!(s2.hits.len(), 1);
+
+    ws.close_document(path_str);
+    let _ = std::fs::remove_file(&pdf_path);
+}

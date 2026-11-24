@@ -8,72 +8,218 @@
       content="default-src 'self' 'unsafe-inline' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' blob: data:;"
     />
     <title>PDFForge</title>
-    <script type="module">
-      import * as AcrobatPro from "./assets/acrobat-pro.js";
-      import MotionAPI from "./assets/motion.js";
-      import PerfAPI from "./assets/pdf-perf.js";
-      window.__acrobatPro = AcrobatPro;
-      window.__pdfforgeMotion = MotionAPI;
-      window.__pdfforgePerf = PerfAPI;
-    </script>
-    <script type="module" crossorigin src="./assets/index-11jbxaY0.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-ClXAvMiX.css">
-    <link rel="stylesheet" crossorigin href="./assets/motion.css">
+    <!-- Preload PDF.js worker so the worker pool warms up immediately -->
+    <link rel="modulepreload" href="./assets/pdf.worker.min-D6GDQ74a.mjs" />
+    <!-- Critical Dark Theme & Splash CSS Inlined (Zero White Flash Before First Paint) -->
     <style>
       html, body, #root {
         background-color: #1e1e1e;
+        color: #fff;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
         touch-action: pan-x pan-y;
         overscroll-behavior: none;
         border: none !important;
       }
-      ::-webkit-scrollbar-corner {
-        background: transparent !important;
+      #pdfforge-splash {
+        position: fixed; inset: 0; z-index: 2000000; background-color: #1e1e1e;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+        opacity: 1; will-change: opacity;
       }
+      #pdfforge-splash.is-leaving { opacity: 0; transition: opacity 90ms ease-in; pointer-events: none; }
+      .pf-splash-mark {
+        width: 44px; height: 44px; border-radius: 11px;
+        background: linear-gradient(135deg, #2f6bff, #60a5fa);
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-weight: 800; font-size: 17px; letter-spacing: -0.04em;
+      }
+      .pf-splash-title { color: #f3f4f6; font-family: "Segoe UI", sans-serif; font-size: 13px; font-weight: 600; }
+      .pf-splash-track { width: 140px; height: 2px; border-radius: 9999px; background: rgba(255,255,255,0.12); overflow: hidden; }
+      .pf-splash-bar { width: 45%; height: 100%; border-radius: 9999px; background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+      ::-webkit-scrollbar-corner { background: transparent !important; }
       .textLayer, .textLayer span, .textLayer br, .select-text {
         -webkit-user-select: text !important;
         user-select: text !important;
       }
-
+      /* GPU-friendly page containment & off-screen culling */
+      .pf-page-host {
+        contain: layout style paint;
+        content-visibility: auto;
+        contain-intrinsic-size: 612px 792px;
+        will-change: transform;
+      }
+      .pf-zoom-layer {
+        transform-origin: 0 0;
+        will-change: transform;
+      }
       /* Universal Dialog / Modal Top Priority Stacking & Interactivity */
       [data-pdfforge-modal], .pdfforge-modal-backdrop, [role="dialog"] {
-        position: fixed !important;
-        inset: 0 !important;
-        z-index: 999999 !important;
-        pointer-events: auto !important;
-        isolation: isolate !important;
+        position: fixed !important; inset: 0 !important; z-index: 999999 !important;
+        pointer-events: auto !important; isolation: isolate !important;
       }
-      [data-pdfforge-modal] *, .pdfforge-modal-backdrop * {
-        pointer-events: auto;
-      }
+      [data-pdfforge-modal] *, .pdfforge-modal-backdrop * { pointer-events: auto; }
       [data-pdfforge-close], button[data-pdfforge-close], [data-dismiss-modal] {
-        pointer-events: auto !important;
-        cursor: pointer !important;
-        position: relative !important;
-        z-index: 100 !important;
+        pointer-events: auto !important; cursor: pointer !important; position: relative !important; z-index: 100 !important;
       }
-      [data-pdfforge-close] *, button[data-pdfforge-close] *, [data-dismiss-modal] * {
-        pointer-events: none !important;
-      }
-      .z-\[100\], .z-\[110\], .z-100 {
-        z-index: 999999 !important;
-      }
-
-      /* Bundled Offline Fonts for Live Font Preview & Acrobat Text Reflow */
-      @font-face { font-family: 'Noto Sans'; src: url('./fonts/NotoSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Noto Serif'; src: url('./fonts/NotoSerif-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Noto Sans Bengali'; src: url('./fonts/NotoSansBengali-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Noto Sans Mono'; src: url('./fonts/NotoSansMono-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Roboto'; src: url('./fonts/Roboto-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Open Sans'; src: url('./fonts/OpenSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Source Sans 3'; src: url('./fonts/SourceSans3-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
-      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
-      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
-      @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-BoldItalic.ttf') format('truetype'); font-weight: 700; font-style: italic; font-display: swap; }
+      [data-pdfforge-close] *, button[data-pdfforge-close] *, [data-dismiss-modal] * { pointer-events: none !important; }
+      .z-\[100\], .z-\[110\], .z-100 { z-index: 999999 !important; }
     </style>
+    <link rel="stylesheet" crossorigin href="./assets/index-ClXAvMiX.css">
+    <link rel="stylesheet" crossorigin href="./assets/motion.css" media="print" onload="this.media='all'">
+    <script>
+      // Signal native Rust window reveal immediately after first dark frame paints (zero white flash, <200ms)
+      (function () {
+        requestAnimationFrame(function () {
+          try {
+            if (window.ipc && window.ipc.postMessage) {
+              window.ipc.postMessage(JSON.stringify({ cmd: "windowReady" }));
+            }
+          } catch (_) {}
+        });
+      })();
+    </script>
+    <script type="module">
+      import MotionAPI from "./assets/motion.js";
+      import PerfAPI from "./assets/pdf-perf.js";
+      import PerfLogger from "./assets/perf-logger.js";
+      window.__pdfforgeMotion = MotionAPI;
+      window.__pdfforgePerf = PerfAPI;
+      window.__pdfforgePerfLog = PerfLogger;
+
+      // Lazy code-split loaders for heavy optional subsystems (Acrobat Edit Engine & OCR UI)
+      let _acMod = null, _acPromise = null;
+      const loadAcrobat = () => {
+        if (_acMod) return Promise.resolve(_acMod);
+        if (!_acPromise) {
+          _acPromise = import("./assets/acrobat-pro.js").then((m) => {
+            _acMod = m;
+            window.__acrobatPro = m;
+            return m;
+          });
+        }
+        return _acPromise;
+      };
+      window.__loadAcrobatPro = loadAcrobat;
+      window.__acrobatPro = {
+        __lazy: true,
+        getSavedHighlightColor() {
+          if (_acMod && _acMod.getSavedHighlightColor) return _acMod.getSavedHighlightColor();
+          try { return localStorage.getItem("pdfforge_highlight_color") || "#facc15"; } catch { return "#facc15"; }
+        },
+        setSavedHighlightColor(c) {
+          try { localStorage.setItem("pdfforge_highlight_color", c); } catch {}
+          if (_acMod && _acMod.setSavedHighlightColor) return _acMod.setSavedHighlightColor(c);
+          return c;
+        },
+        getSelectionState() {
+          return _acMod && _acMod.getSelectionState ? _acMod.getSelectionState() : { active: false, text: "" };
+        },
+        clearSelection(fp) { _acMod && _acMod.clearSelection && _acMod.clearSelection(fp); },
+        applySelectionAction(...a) { return loadAcrobat().then((m) => m.applySelectionAction && m.applySelectionAction(...a)); },
+        showContextMenu(...a) { return loadAcrobat().then((m) => m.showContextMenu && m.showContextMenu(...a)); },
+        closeContextMenu() { _acMod && _acMod.closeContextMenu && _acMod.closeContextMenu(); },
+        dataUrlToImagePayload(...a) { return loadAcrobat().then((m) => m.dataUrlToImagePayload && m.dataUrlToImagePayload(...a)); },
+        getCachedLayout(...a) { return loadAcrobat().then((m) => m.getCachedLayout && m.getCachedLayout(...a)); },
+        getCachedObjects(...a) { return loadAcrobat().then((m) => m.getCachedObjects && m.getCachedObjects(...a)); },
+        getSystemFonts() { return loadAcrobat().then((m) => (m.getSystemFonts ? m.getSystemFonts() : [])); },
+        mountAcrobatPageSurface(opts) {
+          let destroyed = false, realCtrl = null;
+          // Only mount heavy Acrobat edit/selection overlay lazily once module loads or user interacts
+          const startMount = () => {
+            if (destroyed || realCtrl) return;
+            loadAcrobat().then((m) => {
+              if (!destroyed && m && m.mountAcrobatPageSurface) {
+                realCtrl = m.mountAcrobatPageSurface(opts);
+              }
+            }).catch(() => {});
+          };
+          const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 180));
+          const idleId = idle(startMount, { timeout: 450 });
+          return {
+            refreshLayoutOnly() { realCtrl && realCtrl.refreshLayoutOnly && realCtrl.refreshLayoutOnly(); },
+            getSelectedText() { return realCtrl && realCtrl.getSelectedText ? realCtrl.getSelectedText() : ""; },
+            openEditBlockAtPoint(x, y) {
+              if (realCtrl && realCtrl.openEditBlockAtPoint) return realCtrl.openEditBlockAtPoint(x, y);
+              loadAcrobat().then((m) => {
+                if (!destroyed && !realCtrl && m && m.mountAcrobatPageSurface) realCtrl = m.mountAcrobatPageSurface(opts);
+                realCtrl && realCtrl.openEditBlockAtPoint && realCtrl.openEditBlockAtPoint(x, y);
+              }).catch(() => {});
+            },
+            hitShapeAtClient(x, y) { return realCtrl && realCtrl.hitShapeAtClient ? realCtrl.hitShapeAtClient(x, y) : null; },
+            destroy() {
+              destroyed = true;
+              if (window.cancelIdleCallback) try { window.cancelIdleCallback(idleId); } catch {}
+              realCtrl && realCtrl.destroy && realCtrl.destroy();
+              realCtrl = null;
+            },
+          };
+        },
+        getControllerForPage(fp, pg) { return _acMod && _acMod.getControllerForPage ? _acMod.getControllerForPage(fp, pg) : null; },
+        bumpRevision(fp, rev, pg) { _acMod && _acMod.bumpRevision && _acMod.bumpRevision(fp, rev, pg); },
+        evictFileCaches(fp) { _acMod && _acMod.evictFileCaches && _acMod.evictFileCaches(fp); },
+        notifyAllPageSurfaces(fp) { _acMod && _acMod.notifyAllPageSurfaces && _acMod.notifyAllPageSurfaces(fp); },
+      };
+
+      let _ocrMod = null, _ocrPromise = null;
+      const loadOcr = () => {
+        if (_ocrMod) return Promise.resolve(_ocrMod);
+        if (!_ocrPromise) {
+          _ocrPromise = import("./assets/ocr-ui.js").then((m) => {
+            _ocrMod = m.default || m;
+            window.__pdfforgeOcrUI = _ocrMod;
+            return _ocrMod;
+          });
+        }
+        return _ocrPromise;
+      };
+      window.__pdfforgeOcrUI = {
+        __lazy: true,
+        registerViewerContext(ctx) { loadOcr().then((m) => m.registerViewerContext(ctx)).catch(() => {}); },
+        onPageDisplayed(ctx) {
+          const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 300));
+          idle(() => { loadOcr().then((m) => m.onPageDisplayed(ctx)).catch(() => {}); }, { timeout: 800 });
+        },
+        checkScannedPage(fp, pg, rev) { return loadOcr().then((m) => m.checkScannedPage(fp, pg, rev)); },
+        getCachedScanStatus(fp, pg, rev) { return _ocrMod ? _ocrMod.getCachedScanStatus(fp, pg, rev) : null; },
+        clearScanCacheForFile(fp) { _ocrMod && _ocrMod.clearScanCacheForFile(fp); },
+        openRecognizeTextDialog(opts) { return loadOcr().then((m) => m.openRecognizeTextDialog(opts)); },
+        fetchLanguages() { return loadOcr().then((m) => m.fetchLanguages()); },
+      };
+
+      // Lazily inject non-critical bundled @font-face declarations & pre-warm PDF.js worker AFTER first paint
+      const idleBoot = window.requestIdleCallback || ((fn) => setTimeout(fn, 250));
+      idleBoot(() => {
+        try {
+          const st = document.createElement("style");
+          st.id = "pdfforge-lazy-fonts";
+          st.textContent = `
+            @font-face { font-family: 'Noto Sans'; src: url('./fonts/NotoSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Noto Serif'; src: url('./fonts/NotoSerif-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Noto Sans Bengali'; src: url('./fonts/NotoSansBengali-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Noto Sans Mono'; src: url('./fonts/NotoSansMono-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Roboto'; src: url('./fonts/Roboto-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Open Sans'; src: url('./fonts/OpenSans-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Source Sans 3'; src: url('./fonts/SourceSans3-Regular.ttf') format('truetype'); font-weight: 100 900; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Lato'; src: url('./fonts/Lato-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+            @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+            @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+            @font-face { font-family: 'Liberation Sans'; src: url('./standard_fonts/LiberationSans-BoldItalic.ttf') format('truetype'); font-weight: 700; font-style: italic; font-display: swap; }
+          `;
+          document.head.appendChild(st);
+        } catch (_) {}
+        try {
+          // Pre-warm PDF.js worker right after first paint so first PDF opens without worker spin-up delay
+          if (window.__pdfforgePerf && window.__pdfforgePerf.getSharedWorker) {
+            window.__pdfforgePerf.getSharedWorker();
+          }
+        } catch (_) {}
+      }, { timeout: 600 });
+    </script>
+    <script type="module" crossorigin src="./assets/index-11jbxaY0.js"></script>
   </head>
   <body style="background-color:#1e1e1e" class="bg-viewer text-white overflow-hidden m-0 p-0 antialiased font-sans">
     <div id="pdfforge-splash" aria-hidden="true">
@@ -115,24 +261,17 @@
         function onGlobalPointer(ev) {
           var target = ev.target;
           if (!target) return;
-          // If the modal opts into React-managed close/confirmation (e.g. Combine Files, Print), do not hijack its buttons
           var modalEl = target.closest && target.closest('[data-pdfforge-modal],[role="dialog"]');
-          if (modalEl && modalEl.hasAttribute('data-pdfforge-managed')) {
-            return;
-          }
+          if (modalEl && modalEl.hasAttribute('data-pdfforge-managed')) return;
 
-          // 1. Check if user clicked a designated close button or explicit cancel/close text
           var closeBtn = target.closest && target.closest('[data-pdfforge-close], button[data-pdfforge-close], [data-dismiss-modal]');
           if (!closeBtn && target.closest) {
             var btn = target.closest('button');
             if (btn && isModalElement(btn)) {
               var txt = (btn.textContent || '').trim().toLowerCase();
-              if (txt === 'close' || txt === 'cancel' || txt === 'no, later') {
-                closeBtn = btn;
-              }
+              if (txt === 'close' || txt === 'cancel' || txt === 'no, later') closeBtn = btn;
             }
           }
-
           if (closeBtn) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -140,8 +279,6 @@
             closeAllModals('close-button');
             return;
           }
-
-          // 2. Check if user clicked directly on the modal backdrop
           if (target.hasAttribute && target.hasAttribute('data-pdfforge-modal')) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -177,6 +314,5 @@
         }, { capture: true });
       })();
     </script>
-
   </body>
 </html>

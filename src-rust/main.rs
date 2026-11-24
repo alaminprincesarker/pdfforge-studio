@@ -1,14 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dialogs;
+mod disk_cache;
 mod font_shaper;
 mod installer;
+mod ocr;
 mod pdf_annots;
 mod pdf_engine;
 mod pdf_layout;
 mod pdf_objects;
 #[cfg(test)]
 mod pdf_tests;
+mod perf;
 mod single_instance;
 mod store;
 
@@ -221,6 +224,7 @@ enum UserEvent {
     DragLeave,
     DropFiles(Vec<String>),
     OpenFiles(Vec<String>),
+    PerfBenchExit,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +252,41 @@ struct RustRenderPagePayload {
     tile: Option<[i32; 4]>,
     #[serde(default)]
     high_quality: bool,
+    #[serde(default)]
+    is_thumb: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedSearchPayload {
+    file_path: String,
+    query: String,
+    #[serde(default)]
+    case_sensitive: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskCacheLimitPayload {
+    limit_mb: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskRenderGetPayload {
+    file_hash: String,
+    #[serde(default = "default_rev_one")]
+    revision: u64,
+    page: usize,
+    zoom_bucket: u32,
+    #[serde(default)]
+    rotation: i32,
+    #[serde(default)]
+    is_thumb: bool,
+}
+
+fn default_rev_one() -> u64 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -672,6 +711,27 @@ struct AcrobatSaveVerifiedPayload {
     compact: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrDetectPayload {
+    file_path: String,
+    page: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrInspectRangePayload {
+    file_path: String,
+    pages: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrResolveCancelPayload {
+    job_id: String,
+    keep_partial: bool,
+}
+
 fn default_compact_save() -> bool {
     true
 }
@@ -1023,7 +1083,7 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.2.5';
+      return '1.3.0';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -1128,6 +1188,57 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
         throw new Error(txt || 'Rust PDFium page render failed');
       }
       return await res.arrayBuffer();
+    },
+    renderRustPageBlob: async function (payload) {
+      const res = await fetch('/__rust_api__/render/page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(txt || 'Rust PDFium page render failed');
+      }
+      return await res.blob();
+    },
+    getDiskCacheStats: async function () {
+      return await apiPostJson('/cache/stats', {});
+    },
+    clearDiskCache: async function () {
+      return await apiPostJson('/cache/clear', {});
+    },
+    setDiskCacheLimit: async function (limitMb) {
+      return await apiPostJson('/cache/setLimit', { limitMb: limitMb });
+    },
+    getDiskRenderBlob: async function (payload) {
+      const res = await fetch('/__rust_api__/cache/getRender', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok || res.status === 204) return null;
+      return await res.blob();
+    },
+    putDiskRenderBlob: function (meta, blob) {
+      const q = new URLSearchParams({
+        fh: String(meta.fileHash || ''),
+        rev: String(meta.revision || 1),
+        p: String(meta.page || 1),
+        z: String(meta.zoomBucket || 100),
+        rot: String(meta.rotation || 0),
+        th: meta.isThumb ? '1' : '0',
+      });
+      fetch('/__rust_api__/cache/putRender?' + q.toString(), {
+        method: 'POST',
+        body: blob,
+      }).catch(() => {});
+    },
+    searchIndexed: async function (filePath, query, caseSensitive) {
+      return await apiPostJson('/search/indexed', {
+        filePath: filePath,
+        query: query,
+        caseSensitive: !!caseSensitive,
+      });
     },
     startBackgroundJob: async function (payload) {
       return await apiPostJson('/jobs/start', payload);
@@ -1273,6 +1384,30 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     listSystemFonts: function () { return window.electronAPI.listSystemFonts(); }
   };
 
+  window.pdfforgeOcr = {
+    detectScanned: function (filePath, page) {
+      return api('ocr/detectScanned', { filePath: filePath, page: page });
+    },
+    inspectRange: function (filePath, pages) {
+      return api('ocr/inspectRange', { filePath: filePath, pages: pages });
+    },
+    languages: function () {
+      return api('ocr/languages', {});
+    },
+    start: function (req) {
+      return api('ocr/start', req);
+    },
+    status: function (jobId) {
+      return api('ocr/status', { jobId: jobId });
+    },
+    cancel: function (jobId) {
+      return api('ocr/cancel', { jobId: jobId });
+    },
+    resolveCancel: function (jobId, keepPartial) {
+      return api('ocr/resolveCancel', { jobId: jobId, keepPartial: !!keepPartial });
+    }
+  };
+
   window.addEventListener('error', function (e) {
     fetch('/__rust_api__/diag', {
       method: 'POST',
@@ -1338,6 +1473,8 @@ fn handle_api_request(
     pdf_workspace: PdfWorkspaceEngine,
     stream_registry: FileStreamRegistry,
     job_registry: BackgroundJobRegistry,
+    ocr_jobs: ocr::OcrJobManager,
+    proxy_for_api: tao::event_loop::EventLoopProxy<UserEvent>,
     responder: RequestAsyncResponder,
 ) {
     match uri_path {
@@ -1370,6 +1507,7 @@ fn handle_api_request(
                     let ws = pdf_workspace.clone();
                     let reg = stream_registry.clone();
                     thread::spawn(move || {
+                        let t0 = std::time::Instant::now();
                         let meta = match fs::metadata(&p.file_path) {
                             Ok(m) => m,
                             Err(e) => {
@@ -1433,6 +1571,17 @@ fn handle_api_request(
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "document.pdf".to_string());
+                        let probe = ws.probe_file_fast(&p.file_path, &head, live_size);
+                        perf::record_span(
+                            "file/register",
+                            t0.elapsed().as_secs_f64() * 1000.0,
+                            format!("{} ({:.1}MB)", file_name, live_size as f64 / 1048576.0),
+                        );
+                        let is_lin = probe.as_ref().map(|x| x.is_linearized).unwrap_or(false);
+                        let prefer_pdfium = probe
+                            .as_ref()
+                            .map(|x| x.prefer_pdfium)
+                            .unwrap_or(live_size > 40 * 1024 * 1024);
                         responder.respond(json_response(
                             StatusCode::OK,
                             &json!({
@@ -1442,8 +1591,16 @@ fn handle_api_request(
                                 "size": live_size,
                                 "revision": rev,
                                 "fileName": file_name,
+                                "fileHash": probe.as_ref().map(|x| x.file_hash.clone()).unwrap_or_else(|| disk_cache::compute_file_hash(&p.file_path)),
+                                "numPages": probe.as_ref().map(|x| x.num_pages),
+                                "page1Width": probe.as_ref().map(|x| x.page1_width),
+                                "page1Height": probe.as_ref().map(|x| x.page1_height),
+                                "isLinearized": is_lin,
+                                "preferPdfium": prefer_pdfium,
+                                "vectorPathCount": probe.as_ref().map(|x| x.vector_path_count).unwrap_or(0),
+                                "imageObjectCount": probe.as_ref().map(|x| x.image_object_count).unwrap_or(0),
                                 "disableAutoFetch": live_size > 20 * 1024 * 1024,
-                                "heavyHint": live_size > 80 * 1024 * 1024
+                                "heavyHint": prefer_pdfium || live_size > 40 * 1024 * 1024
                             }),
                         ));
                     });
@@ -1478,8 +1635,9 @@ fn handle_api_request(
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
                     thread::spawn(move || {
+                        let t0 = std::time::Instant::now();
                         let tile = p.tile.map(|t| (t[0], t[1], t[2].max(1) as u32, t[3].max(1) as u32));
-                        match ws.render_page_png_cached(
+                        match ws.render_page_fast_cached(
                             &p.file_path,
                             p.page,
                             p.width,
@@ -1487,14 +1645,20 @@ fn handle_api_request(
                             p.rotation,
                             tile,
                             p.high_quality,
+                            p.is_thumb,
                         ) {
-                            Ok(png_arc) => {
+                            Ok((img_arc, mime)) => {
+                                perf::record_span(
+                                    "render/page",
+                                    t0.elapsed().as_secs_f64() * 1000.0,
+                                    format!("p{} {}x{} ({})", p.page, p.width, p.height, mime),
+                                );
                                 let resp = Response::builder()
                                     .status(StatusCode::OK)
-                                    .header(CONTENT_TYPE, "image/png")
+                                    .header(CONTENT_TYPE, mime)
                                     .header("Access-Control-Allow-Origin", "*")
                                     .header("Cache-Control", "no-store")
-                                    .body(Cow::Owned((*png_arc).clone()))
+                                    .body(Cow::Owned((*img_arc).clone()))
                                     .unwrap();
                                 responder.respond(resp);
                             }
@@ -1510,6 +1674,111 @@ fn handle_api_request(
                 Err(err) => responder.respond(json_response(
                     StatusCode::BAD_REQUEST,
                     &json!({ "error": err.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/cache/stats" => {
+            thread::spawn(move || {
+                let st = disk_cache::get_disk_cache_stats();
+                responder.respond(json_response(StatusCode::OK, &st));
+            });
+        }
+        "/__rust_api__/cache/clear" => {
+            let ws = pdf_workspace.clone();
+            thread::spawn(move || {
+                ws.set_render_budget_mb(300);
+                let st = disk_cache::clear_disk_cache();
+                responder.respond(json_response(StatusCode::OK, &st));
+            });
+        }
+        "/__rust_api__/cache/setLimit" => {
+            if let Ok(p) = serde_json::from_slice::<DiskCacheLimitPayload>(&body) {
+                disk_cache::set_disk_cache_limit_mb(p.limit_mb);
+            }
+            let st = disk_cache::get_disk_cache_stats();
+            responder.respond(json_response(StatusCode::OK, &st));
+        }
+        "/__rust_api__/cache/getRender" => {
+            match serde_json::from_slice::<DiskRenderGetPayload>(&body) {
+                Ok(p) => {
+                    thread::spawn(move || {
+                        if let Some(png) = disk_cache::read_cached_render(
+                            &p.file_hash,
+                            p.revision,
+                            p.page,
+                            p.zoom_bucket,
+                            p.rotation,
+                            p.is_thumb,
+                        ) {
+                            let resp = Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "image/png")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(Cow::Owned(png))
+                                .unwrap();
+                            responder.respond(resp);
+                        } else {
+                            let resp = Response::builder()
+                                .status(StatusCode::NO_CONTENT)
+                                .body(Cow::Borrowed(&b""[..]))
+                                .unwrap();
+                            responder.respond(resp);
+                        }
+                    });
+                }
+                Err(_) => {
+                    let resp = Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body(Cow::Borrowed(&b""[..]))
+                        .unwrap();
+                    responder.respond(resp);
+                }
+            }
+        }
+        "/__rust_api__/cache/putRender" => {
+            let mut fh = String::new();
+            let mut rev = 1u64;
+            let mut page = 1usize;
+            let mut zoom_b = 100u32;
+            let mut rot = 0i32;
+            let mut is_th = false;
+            if let Some(q) = query {
+                for kv in q.split('&') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        match k {
+                            "fh" => fh = v.to_string(),
+                            "rev" => rev = v.parse().unwrap_or(1),
+                            "p" => page = v.parse().unwrap_or(1),
+                            "z" => zoom_b = v.parse().unwrap_or(100),
+                            "rot" => rot = v.parse().unwrap_or(0),
+                            "th" => is_th = v == "1" || v == "true",
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if !fh.is_empty() && !body.is_empty() {
+                disk_cache::write_cached_render_async(fh, rev, page, zoom_b, rot, is_th, body);
+            }
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
+        "/__rust_api__/search/indexed" => {
+            match serde_json::from_slice::<IndexedSearchPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match disk_cache::search_file_indexed(&ws, &p.file_path, &p.query, p.case_sensitive) {
+                            Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
+                            Err(err) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "ok": false, "error": err }),
+                            )),
+                        }
+                    });
+                }
+                Err(err) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": err.to_string() }),
                 )),
             }
         }
@@ -1908,6 +2177,7 @@ fn handle_api_request(
             if let Ok(partial) = serde_json::from_slice::<PartialAppSettings>(&body) {
                 let updated = store.lock().unwrap().update_settings(partial);
                 pdf_workspace.set_render_budget_mb(updated.memory_budget_mb);
+                disk_cache::set_disk_cache_limit_mb(updated.disk_cache_limit_mb);
                 responder.respond(json_response(StatusCode::OK, &updated));
             } else {
                 let settings = store.lock().unwrap().get_settings();
@@ -2880,6 +3150,136 @@ fn handle_api_request(
             }
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
         }
+        "/__rust_api__/ocr/languages" => {
+            thread::spawn(move || {
+                let res = ocr::list_available_languages();
+                responder.respond(json_response(StatusCode::OK, &res));
+            });
+        }
+        "/__rust_api__/ocr/detectScanned" => {
+            match serde_json::from_slice::<OcrDetectPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ocr::inspect_page_scan_status(&ws, &p.file_path, p.page) {
+                            Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::OK,
+                                &json!({ "isScanned": false, "hasText": false, "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/ocr/inspectRange" => {
+            match serde_json::from_slice::<OcrInspectRangePayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    thread::spawn(move || {
+                        match ocr::inspect_pages_range_status(&ws, &p.file_path, &p.pages) {
+                            Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
+                            Err(e) => responder.respond(json_response(
+                                StatusCode::BAD_REQUEST,
+                                &json!({ "error": e }),
+                            )),
+                        }
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/ocr/start" => {
+            match serde_json::from_slice::<ocr::OcrStartRequest>(&body) {
+                Ok(req) => {
+                    let ws = Arc::new(pdf_workspace.clone());
+                    let mgr = ocr_jobs.clone();
+                    thread::spawn(move || match mgr.start_job(ws, req) {
+                        Ok(job_id) => responder.respond(json_response(
+                            StatusCode::OK,
+                            &json!({ "ok": true, "jobId": job_id }),
+                        )),
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::OK,
+                            &json!({ "ok": false, "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "ok": false, "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/ocr/status" => {
+            if let Ok(p) = serde_json::from_slice::<JobIdPayload>(&body) {
+                if let Some(snap) = ocr_jobs.get_status(&p.job_id) {
+                    responder.respond(json_response(StatusCode::OK, &snap));
+                    return;
+                }
+            }
+            responder.respond(json_response(
+                StatusCode::NOT_FOUND,
+                &json!({ "status": "error", "error": "OCR job not found" }),
+            ));
+        }
+        "/__rust_api__/ocr/cancel" => {
+            let ok = serde_json::from_slice::<JobIdPayload>(&body)
+                .map(|p| ocr_jobs.cancel(&p.job_id))
+                .unwrap_or(false);
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
+        }
+        "/__rust_api__/ocr/resolveCancel" => {
+            match serde_json::from_slice::<OcrResolveCancelPayload>(&body) {
+                Ok(p) => {
+                    let ws = pdf_workspace.clone();
+                    let mgr = ocr_jobs.clone();
+                    thread::spawn(move || match mgr.resolve_cancel(&ws, &p.job_id, p.keep_partial) {
+                        Ok(snap) => responder.respond(json_response(StatusCode::OK, &snap)),
+                        Err(e) => responder.respond(json_response(
+                            StatusCode::OK,
+                            &json!({ "status": "error", "error": e }),
+                        )),
+                    });
+                }
+                Err(e) => responder.respond(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": e.to_string() }),
+                )),
+            }
+        }
+        "/__rust_api__/perf/uiReady" => {
+            let (win_ms, ui_ms) = perf::mark_ui_ready();
+            responder.respond(json_response(
+                StatusCode::OK,
+                &json!({ "ok": true, "windowVisibleMs": win_ms, "uiReadyMs": ui_ms }),
+            ));
+        }
+        "/__rust_api__/perf/metrics" => {
+            let snap = perf::snapshot();
+            responder.respond(json_response(StatusCode::OK, &snap));
+        }
+        "/__rust_api__/perf/benchDone" => {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+                if let Some(out_path) = v.get("outputPath").and_then(|s| s.as_str()) {
+                    if let Some(report) = v.get("report") {
+                        let _ = fs::write(
+                            out_path,
+                            serde_json::to_string_pretty(report).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            let _ = proxy_for_api.send_event(UserEvent::PerfBenchExit);
+            responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
+        }
         "/__rust_api__/diag" => {
             let msg = String::from_utf8_lossy(&body).to_string();
             let log_path = store.lock().unwrap().user_data_dir().join("startup_diag.log");
@@ -2897,42 +3297,59 @@ fn handle_api_request(
 }
 
 fn main() {
+    perf::init_process_start();
     if installer::check_and_run_installer_mode() {
         return;
     }
 
+    let perf_bench_cfg = perf::parse_perf_bench_args();
     let store = Arc::new(Mutex::new(AppDataStore::new()));
     let user_data_dir = store.lock().unwrap().user_data_dir().clone();
-    let cli_pdfs = pdf_engine::parse_cli_pdf_args();
+    let cli_pdfs = if perf_bench_cfg.is_some() {
+        Vec::new()
+    } else {
+        pdf_engine::parse_cli_pdf_args()
+    };
     let pending_boot_open_files: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let webview_ready: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Enforce single-window architecture: clicking/opening additional PDF files forwards them
     // into the running window to open as new tabs, then exits the secondary launcher process.
-    let mut instance_guard = match single_instance::try_acquire_or_forward(&user_data_dir, &cli_pdfs) {
-        Some(guard) => guard,
-        None => return,
+    let mut instance_guard = if perf_bench_cfg.is_some() {
+        None
+    } else {
+        match single_instance::try_acquire_or_forward(&user_data_dir, &cli_pdfs) {
+            Some(guard) => Some(guard),
+            None => return,
+        }
     };
 
     #[cfg(target_os = "windows")]
     {
         ensure_webview2_loader_loaded(&user_data_dir);
-        ensure_pdfium_dll_present(&user_data_dir);
+        let pdfium_dir = user_data_dir.clone();
+        std::thread::spawn(move || {
+            ensure_pdfium_dll_present(&pdfium_dir);
+        });
     }
     let pdf_workspace = PdfWorkspaceEngine::new();
     {
         let init_settings = store.lock().unwrap().get_settings();
         pdf_workspace.set_render_budget_mb(init_settings.memory_budget_mb);
+        disk_cache::set_disk_cache_limit_mb(init_settings.disk_cache_limit_mb);
     }
     let stream_registry = FileStreamRegistry::new();
     let job_registry = BackgroundJobRegistry::new();
+    let ocr_jobs = ocr::OcrJobManager::new();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let proxy_for_single = proxy.clone();
-    single_instance::start_listener(&mut instance_guard, move |paths| {
-        let _ = proxy_for_single.send_event(UserEvent::OpenFiles(paths));
-    });
+    if let Some(ref mut ig) = instance_guard {
+        single_instance::start_listener(ig, move |paths| {
+            let _ = proxy_for_single.send_event(UserEvent::OpenFiles(paths));
+        });
+    }
 
     let app_icon = tao::window::Icon::from_rgba(ICON_RGBA_BYTES.to_vec(), 64, 64).ok();
 
@@ -2947,11 +3364,21 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create native Rust window");
 
-    single_instance::register_window(&instance_guard, &window);
+    if let Some(ref ig) = instance_guard {
+        single_instance::register_window(ig, &window);
+    }
     #[cfg(target_os = "windows")]
     win32_frame::apply_frameless_appearance(&window, true);
+    // Show dark-painted native frame immediately (GCLP_HBRBACKGROUND = #1e1e1e -> zero white flash, <100ms)
+    window.set_visible(true);
+    perf::mark_window_visible();
+    window.set_focus();
 
-    let web_data_dir = store.lock().unwrap().user_data_dir().join("webview2");
+    let web_data_dir = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|p| p.join("PDFForge").join("webview2"))
+        .unwrap_or_else(|| store.lock().unwrap().user_data_dir().join("webview2"));
+    let _ = fs::create_dir_all(&web_data_dir);
     let mut web_context = WebContext::new(Some(web_data_dir));
 
     let store_for_protocol = Arc::clone(&store);
@@ -2960,11 +3387,21 @@ fn main() {
     let workspace_for_protocol = pdf_workspace.clone();
     let streams_for_protocol = stream_registry.clone();
     let jobs_for_protocol = job_registry.clone();
+    let ocr_jobs_for_protocol = ocr_jobs.clone();
     let proxy_for_ipc = proxy.clone();
     let proxy_for_drop = proxy.clone();
     let proxy_for_close = proxy.clone();
+    let proxy_for_protocol = proxy.clone();
 
     let mut init_script = INIT_BRIDGE_SCRIPT.to_string();
+    if let Some(ref cfg) = perf_bench_cfg {
+        if let Ok(cfg_json) = serde_json::to_string(&json!({
+            "outputPath": cfg.output_json,
+            "files": cfg.files,
+        })) {
+            init_script.push_str(&format!("\nwindow.__pdfforgePerfBench = {};\n", cfg_json));
+        }
+    }
     if !cli_pdfs.is_empty() {
         if let Ok(escaped) = serde_json::to_string(&cli_pdfs) {
             init_script.push_str(&format!(
@@ -2981,7 +3418,19 @@ fn main() {
     #[cfg(not(debug_assertions))]
     let builder = builder.with_devtools(false);
     #[cfg(target_os = "windows")]
-    let builder = builder.with_browser_accelerator_keys(false);
+    let extra_wv_args = {
+        let mut s = String::from(
+            "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --enable-accelerated-2d-canvas",
+        );
+        if let Some(sf) = perf_bench_cfg.as_ref().and_then(|c| c.scale_factor) {
+            s.push_str(&format!(" --force-device-scale-factor={:.2}", sf));
+        }
+        s
+    };
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .with_browser_accelerator_keys(false)
+        .with_additional_browser_args(&extra_wv_args);
     let webview = builder
         .with_drag_drop_handler(move |event| {
             match event {
@@ -3033,6 +3482,8 @@ fn main() {
                     workspace_for_protocol.clone(),
                     streams_for_protocol.clone(),
                     jobs_for_protocol.clone(),
+                    ocr_jobs_for_protocol.clone(),
+                    proxy_for_protocol.clone(),
                     responder,
                 );
                 return;
@@ -3152,9 +3603,15 @@ fn main() {
 
             if let Some(asset) = Assets::get(asset_key) {
                 let mime = guess_mime_type(asset_key);
+                let cache_hdr = if asset_key == "index.html" {
+                    "no-cache"
+                } else {
+                    "public, max-age=31536000, immutable"
+                };
                 let resp = Response::builder()
                     .status(StatusCode::OK)
                     .header(CONTENT_TYPE, mime)
+                    .header("Cache-Control", cache_hdr)
                     .header("Access-Control-Allow-Origin", "*")
                     .body(asset.data)
                     .unwrap();
@@ -3230,14 +3687,7 @@ fn main() {
     let mut was_maximized_before_fs = true;
     let mut close_pending = false;
     let mut awaiting_user_close_prompt = false;
-    let mut window_shown = false;
-
-    // Fallback safety timer: guarantee the window becomes visible quickly even if WebView2 init is slow
-    let proxy_for_show = proxy.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(220));
-        let _ = proxy_for_show.send_event(UserEvent::ShowMainWindow);
-    });
+    let mut window_shown = true;
 
     let sync_webview_bounds = |win: &tao::window::Window, wv: &wry::WebView| {
         let size = win.inner_size();
@@ -3247,6 +3697,8 @@ fn main() {
         });
         let _ = wv.zoom(1.0);
     };
+    sync_webview_bounds(&window, &webview);
+    let _ = webview.focus();
 
     let store_for_close = Arc::clone(&store);
 
@@ -3302,6 +3754,7 @@ fn main() {
                         window_shown = true;
                         sync_webview_bounds(&window, &webview);
                         window.set_visible(true);
+                        perf::mark_window_visible();
                         window.set_focus();
                         let _ = webview.focus();
                     }
@@ -3459,6 +3912,10 @@ fn main() {
                             }
                         }
                     }
+                }
+                UserEvent::PerfBenchExit => {
+                    window.set_visible(false);
+                    *control_flow = ControlFlow::Exit;
                 }
             },
             #[cfg(target_os = "macos")]

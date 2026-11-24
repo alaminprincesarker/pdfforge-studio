@@ -174,6 +174,35 @@ pub fn perform_install(current_exe: &Path, launch_after: bool) -> Result<PathBuf
         strip_zone_identifier(&pdfium_path);
     }
 
+    // Copy offline Tesseract OCR DLLs and tessdata traineddata files if shipped alongside setup exe
+    if let Some(src_dir) = current_exe.parent() {
+        for (sub_candidates, dst_name) in [
+            (&["tesseract", "ocr-runtime/tesseract"][..], "tesseract"),
+            (&["tessdata", "ocr-runtime/tessdata"][..], "tessdata"),
+        ] {
+            let dst = install_dir.join(dst_name);
+            let _ = fs::create_dir_all(&dst);
+            for cand in sub_candidates {
+                let src = src_dir.join(cand);
+                if src.is_dir() {
+                    if let Ok(rd) = fs::read_dir(&src) {
+                        for ent in rd.flatten() {
+                            let sp = ent.path();
+                            if sp.is_file() {
+                                if let Some(fname) = sp.file_name() {
+                                    let dp = dst.join(fname);
+                                    let _ = fs::copy(&sp, &dp);
+                                    strip_zone_identifier(&dp);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         let exe_str = target_exe.to_string_lossy().to_string();

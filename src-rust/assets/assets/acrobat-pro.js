@@ -1086,6 +1086,8 @@ export function mountAcrobatPageSurface(opts) {
     pointerEvents: "none",
     zIndex: "20",
   });
+  inkCanvas.width = 0;
+  inkCanvas.height = 0;
 
   const selLayer = createEl("div", {
     position: "absolute",
@@ -3699,18 +3701,31 @@ export function mountAcrobatPageSurface(opts) {
   };
   window.addEventListener("keydown", onKeyDown);
 
-  async function refreshAll() {
+  let refreshTimer = null;
+  async function refreshAll(forceFull = false) {
     if (destroyed) return;
     syncPointerModes();
+    const t = getTool();
+    const needEditData = forceFull || isEditTool(t) || t === "comment" || t === "note" || t === "form";
+    const meta = window.__pdfforgePerf && window.__pdfforgePerf.getFileMeta
+      ? window.__pdfforgePerf.getFileMeta(filePath)
+      : null;
+    const isLargeFile = !!(meta && meta.size > 10 * 1024 * 1024);
+
+    // Avoid firing heavy lopdf parses on passive scroll of large files; load objects/annots lazily on edit or small files
     const [lay, objs, annRes] = await Promise.all([
       getCachedLayout(filePath, page),
-      getCachedObjects(filePath, page),
-      window.pdfAcrobat.getAnnotations(filePath, page).catch(() => null),
+      needEditData ? getCachedObjects(filePath, page) : Promise.resolve(objectsData),
+      needEditData || !isLargeFile
+        ? window.pdfAcrobat.getAnnotations(filePath, page).catch(() => null)
+        : Promise.resolve(null),
     ]);
     if (destroyed) return;
     layoutData = lay;
-    objectsData = objs;
-    annotsData = annRes && annRes.ok && Array.isArray(annRes.annotations) ? annRes.annotations : [];
+    if (objs) objectsData = objs;
+    if (annRes && annRes.ok && Array.isArray(annRes.annotations)) {
+      annotsData = annRes.annotations;
+    }
     if (selectionState.active && selectionState.filePath === filePath && page >= selectionState.startPage && page <= selectionState.endPage) {
       selectionState = await computeRangeState(
         filePath,
@@ -3727,7 +3742,11 @@ export function mountAcrobatPageSurface(opts) {
     renderShapeOverlays();
   }
 
-  refreshAll();
+  // Defer initial IPC fetch slightly so fast scrolling skips unmounted pages with zero wasted Rust work
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    if (!destroyed) refreshAll(false);
+  }, isEditTool(getTool()) ? 16 : 220);
 
   const api = {
     getPage: () => page,
@@ -3749,11 +3768,15 @@ export function mountAcrobatPageSurface(opts) {
     },
     refreshLayoutOnly: () => {
       syncPointerModes();
+      if (isEditTool(getTool()) && !objectsData) {
+        refreshAll(true);
+        return;
+      }
       renderSelectionOnly();
       renderFormWidgets();
       renderShapeOverlays();
     },
-    reloadFromRust: refreshAll,
+    reloadFromRust: () => refreshAll(true),
     openNewTextBoxAt: (vx = 72, vy = 72) => {
       openEditTextBox(
         {
@@ -3869,6 +3892,10 @@ export function mountAcrobatPageSurface(opts) {
     getSelectedText: () => (selectionState.active && selectionState.filePath === filePath ? selectionState.text : ""),
     destroy: () => {
       destroyed = true;
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
       window.removeEventListener("keydown", onKeyDown);
       if (activeTextEditor) activeTextEditor();
       try {

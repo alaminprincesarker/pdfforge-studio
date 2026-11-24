@@ -40,6 +40,46 @@ fn default_render_quality() -> String {
     "standard".to_string()
 }
 
+fn default_ocr_language() -> String {
+    "eng".to_string()
+}
+
+fn default_ocr_output_mode() -> String {
+    "searchable_image".to_string()
+}
+
+fn default_ocr_downsample_dpi() -> i32 {
+    300
+}
+
+fn default_disk_cache_limit_mb() -> u32 {
+    500
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrPreferences {
+    #[serde(default = "default_ocr_language")]
+    pub language: String,
+    #[serde(default)]
+    pub secondary_language: Option<String>,
+    #[serde(default = "default_ocr_output_mode")]
+    pub output_mode: String,
+    #[serde(default = "default_ocr_downsample_dpi")]
+    pub downsample_dpi: i32,
+}
+
+impl Default for OcrPreferences {
+    fn default() -> Self {
+        Self {
+            language: default_ocr_language(),
+            secondary_language: None,
+            output_mode: default_ocr_output_mode(),
+            downsample_dpi: default_ocr_downsample_dpi(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -63,6 +103,12 @@ pub struct AppSettings {
     pub render_quality: String,
     #[serde(default = "default_false")]
     pub reduce_memory_usage: bool,
+    #[serde(default = "default_true")]
+    pub show_scanned_page_alert: bool,
+    #[serde(default)]
+    pub last_ocr_settings: OcrPreferences,
+    #[serde(default = "default_disk_cache_limit_mb")]
+    pub disk_cache_limit_mb: u32,
 }
 
 impl Default for AppSettings {
@@ -80,6 +126,9 @@ impl Default for AppSettings {
             max_active_docs: 2,
             render_quality: "standard".to_string(),
             reduce_memory_usage: false,
+            show_scanned_page_alert: true,
+            last_ocr_settings: OcrPreferences::default(),
+            disk_cache_limit_mb: 500,
         }
     }
 }
@@ -99,6 +148,9 @@ pub struct PartialAppSettings {
     pub max_active_docs: Option<u32>,
     pub render_quality: Option<String>,
     pub reduce_memory_usage: Option<bool>,
+    pub show_scanned_page_alert: Option<bool>,
+    pub last_ocr_settings: Option<OcrPreferences>,
+    pub disk_cache_limit_mb: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +287,33 @@ impl AppDataStore {
         }
         if let Some(rmu) = partial.reduce_memory_usage {
             current.reduce_memory_usage = rmu;
+        }
+        if let Some(alert) = partial.show_scanned_page_alert {
+            current.show_scanned_page_alert = alert;
+        }
+        if let Some(dcl) = partial.disk_cache_limit_mb {
+            current.disk_cache_limit_mb = dcl.clamp(50, 4096);
+        }
+        if let Some(ocr_pref) = partial.last_ocr_settings {
+            current.last_ocr_settings = OcrPreferences {
+                language: if ocr_pref.language.trim().is_empty() {
+                    default_ocr_language()
+                } else {
+                    ocr_pref.language.trim().to_string()
+                },
+                secondary_language: ocr_pref
+                    .secondary_language
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s != "none"),
+                output_mode: match ocr_pref.output_mode.as_str() {
+                    "searchable_image_exact" => "searchable_image_exact".to_string(),
+                    _ => "searchable_image".to_string(),
+                },
+                downsample_dpi: match ocr_pref.downsample_dpi {
+                    0 | 150 | 300 | 600 => ocr_pref.downsample_dpi,
+                    _ => 300,
+                },
+            };
         }
         if let Ok(json) = serde_json::to_string_pretty(&current) {
             let _ = fs::write(&self.settings_file, json);
