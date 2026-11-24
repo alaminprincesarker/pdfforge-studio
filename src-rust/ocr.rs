@@ -473,6 +473,7 @@ unsafe impl Sync for TessFns {}
 static TESS_API: OnceLock<Result<TessFns, String>> = OnceLock::new();
 
 fn load_tesseract_library() -> Result<TessFns, String> {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut bin_dirs = discover_tesseract_bin_dirs();
     #[cfg(target_os = "macos")]
     {

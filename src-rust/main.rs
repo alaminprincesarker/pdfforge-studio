@@ -226,6 +226,107 @@ enum UserEvent {
     DropFiles(Vec<String>),
     OpenFiles(Vec<String>),
     PerfBenchExit,
+    #[cfg(target_os = "macos")]
+    RespondAsync(Box<dyn FnOnce() + Send>),
+}
+
+struct SafeResponder {
+    inner: RequestAsyncResponder,
+    #[cfg(target_os = "macos")]
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+}
+
+impl SafeResponder {
+    fn new(inner: RequestAsyncResponder, _proxy: tao::event_loop::EventLoopProxy<UserEvent>) -> Self {
+        Self {
+            inner,
+            #[cfg(target_os = "macos")]
+            proxy: _proxy,
+        }
+    }
+
+    fn respond(self, resp: Response<Cow<'static, [u8]>>) {
+        #[cfg(target_os = "macos")]
+        {
+            let inner = self.inner;
+            let _ = self.proxy.send_event(UserEvent::RespondAsync(Box::new(move || {
+                inner.respond(resp);
+            })));
+        }
+        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.inner.respond(resp);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.respond(resp);
+        }
+    }
+}
+
+fn normalize_local_file_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("file://") {
+        let path_part = rest.strip_prefix("localhost").unwrap_or(rest);
+        let decoded = url_decode_utf8(path_part);
+        #[cfg(target_os = "windows")]
+        {
+            return decoded.trim_start_matches('/').replace('/', "\\");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            return decoded;
+        }
+    }
+    trimmed.to_string()
+}
+
+fn url_decode_utf8(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn parse_query_byte_range(query: Option<&str>, total_len: u64) -> Option<(u64, u64)> {
+    let q = query?;
+    let mut start: Option<u64> = None;
+    let mut end: Option<u64> = None;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "start" {
+                start = v.parse::<u64>().ok();
+            } else if k == "end" {
+                end = v.parse::<u64>().ok();
+            }
+        }
+    }
+    let s = start?;
+    if total_len == 0 || s >= total_len {
+        return None;
+    }
+    let e = end
+        .unwrap_or_else(|| s.saturating_add(1024 * 1024 - 1))
+        .min(total_len - 1);
+    if e < s {
+        None
+    } else {
+        Some((s, e))
+    }
 }
 
 #[derive(Deserialize)]
@@ -1079,12 +1180,15 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
     },
 
     // System & App Info
+    getPlatform: function () {
+      return window.__pdfforgePlatform || 'unknown';
+    },
     getAppVersion: async function () {
       try {
         const info = await apiPostJson('/app/getAppInfo', {});
         if (info && info.version) return info.version;
       } catch (e) {}
-      return '1.3.1';
+      return '1.3.2';
     },
     appReady: async function () {
       return await apiPostJson('/app/ready', {});
@@ -1476,7 +1580,7 @@ fn handle_api_request(
     job_registry: BackgroundJobRegistry,
     ocr_jobs: ocr::OcrJobManager,
     proxy_for_api: tao::event_loop::EventLoopProxy<UserEvent>,
-    responder: RequestAsyncResponder,
+    responder: SafeResponder,
 ) {
     match uri_path {
         "/__rust_api__/dialog/openFile" => {
@@ -1505,11 +1609,12 @@ fn handle_api_request(
             let payload: Result<PathPayload, _> = serde_json::from_slice(&body);
             match payload {
                 Ok(p) => {
+                    let norm_path = normalize_local_file_path(&p.file_path);
                     let ws = pdf_workspace.clone();
                     let reg = stream_registry.clone();
                     thread::spawn(move || {
                         let t0 = std::time::Instant::now();
-                        let meta = match fs::metadata(&p.file_path) {
+                        let meta = match fs::metadata(&norm_path) {
                             Ok(m) => m,
                             Err(e) => {
                                 responder.respond(json_response(
@@ -1536,7 +1641,7 @@ fn handle_api_request(
                         }
                         // Quick %PDF- magic validation in first 1024 bytes without loading file
                         let mut head = [0u8; 1024];
-                        let header_ok = match fs::File::open(&p.file_path) {
+                        let header_ok = match fs::File::open(&norm_path) {
                             Ok(mut f) => {
                                 let n = f.read(&mut head).unwrap_or(0);
                                 head[..n].windows(5).any(|w| w == b"%PDF-")
@@ -1556,7 +1661,7 @@ fn handle_api_request(
                             ));
                             return;
                         }
-                        let (backing, rev, _dirty) = match ws.load_backing(&p.file_path) {
+                        let (backing, rev, _dirty) = match ws.load_backing(&norm_path) {
                             Ok(v) => v,
                             Err(e) => {
                                 responder.respond(json_response(
@@ -1567,12 +1672,13 @@ fn handle_api_request(
                             }
                         };
                         let live_size = backing.len() as u64;
-                        let id = reg.register(&p.file_path);
-                        let file_name = std::path::Path::new(&p.file_path)
+                        let id = reg.register(&norm_path);
+                        let file_name = std::path::Path::new(&norm_path)
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "document.pdf".to_string());
-                        let probe = ws.probe_file_fast(&p.file_path, &head, live_size);
+                        let probe = ws.probe_file_fast(&norm_path, &head, live_size);
+                        let pdfium_available = probe.is_some();
                         perf::record_span(
                             "file/register",
                             t0.elapsed().as_secs_f64() * 1000.0,
@@ -1582,7 +1688,7 @@ fn handle_api_request(
                         let prefer_pdfium = probe
                             .as_ref()
                             .map(|x| x.prefer_pdfium)
-                            .unwrap_or(live_size > 40 * 1024 * 1024);
+                            .unwrap_or(false);
                         responder.respond(json_response(
                             StatusCode::OK,
                             &json!({
@@ -1592,16 +1698,17 @@ fn handle_api_request(
                                 "size": live_size,
                                 "revision": rev,
                                 "fileName": file_name,
-                                "fileHash": probe.as_ref().map(|x| x.file_hash.clone()).unwrap_or_else(|| disk_cache::compute_file_hash(&p.file_path)),
+                                "fileHash": probe.as_ref().map(|x| x.file_hash.clone()).unwrap_or_else(|| disk_cache::compute_file_hash(&norm_path)),
                                 "numPages": probe.as_ref().map(|x| x.num_pages),
                                 "page1Width": probe.as_ref().map(|x| x.page1_width),
                                 "page1Height": probe.as_ref().map(|x| x.page1_height),
                                 "isLinearized": is_lin,
+                                "pdfiumAvailable": pdfium_available,
                                 "preferPdfium": prefer_pdfium,
                                 "vectorPathCount": probe.as_ref().map(|x| x.vector_path_count).unwrap_or(0),
                                 "imageObjectCount": probe.as_ref().map(|x| x.image_object_count).unwrap_or(0),
                                 "disableAutoFetch": live_size > 20 * 1024 * 1024,
-                                "heavyHint": prefer_pdfium || live_size > 40 * 1024 * 1024
+                                "heavyHint": prefer_pdfium
                             }),
                         ));
                     });
@@ -2035,10 +2142,11 @@ fn handle_api_request(
             let payload: Result<PathPayload, _> = serde_json::from_slice(&body);
             match payload {
                 Ok(p) => {
+                    let norm_path = normalize_local_file_path(&p.file_path);
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.load_or_sync_from_disk(&p.file_path) {
+                    thread::spawn(move || match ws.load_or_sync_from_disk(&norm_path) {
                         Ok(bytes) => {
-                            let file_name = std::path::Path::new(&p.file_path)
+                            let file_name = std::path::Path::new(&norm_path)
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "document.pdf".to_string());
@@ -3394,7 +3502,11 @@ fn main() {
     let proxy_for_close = proxy.clone();
     let proxy_for_protocol = proxy.clone();
 
-    let mut init_script = INIT_BRIDGE_SCRIPT.to_string();
+    let mut init_script = format!(
+        "window.__pdfforgePlatform = {:?};\n{}",
+        std::env::consts::OS,
+        INIT_BRIDGE_SCRIPT
+    );
     if let Some(ref cfg) = perf_bench_cfg {
         if let Ok(cfg_json) = serde_json::to_string(&json!({
             "outputPath": cfg.output_json,
@@ -3466,10 +3578,11 @@ fn main() {
             }
             true
         })
-        .with_asynchronous_custom_protocol("pdfforge".into(), move |_webview_id, request, responder| {
+        .with_asynchronous_custom_protocol("pdfforge".into(), move |_webview_id, request, raw_responder| {
             let uri = request.uri();
             let path = uri.path();
             let query = uri.query();
+            let responder = SafeResponder::new(raw_responder, proxy_for_protocol.clone());
 
             if path.starts_with("/__rust_api__/") {
                 let body = request.body().clone();
@@ -3497,6 +3610,7 @@ fn main() {
                     .get("range")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
+                let query_owned = query.map(|q| q.to_string());
                 let method = request.method().clone();
                 let regs = streams_for_protocol.clone();
                 let ws = workspace_for_protocol.clone();
@@ -3519,6 +3633,7 @@ fn main() {
                     let Some(fp) = regs.resolve(&id_owned) else {
                         let resp = Response::builder()
                             .status(StatusCode::NOT_FOUND)
+                            .header("Access-Control-Allow-Origin", "*")
                             .body(Cow::Borrowed(&b"PDF stream not found"[..]))
                             .unwrap();
                         responder.respond(resp);
@@ -3528,6 +3643,7 @@ fn main() {
                     let Ok((backing, _, _)) = ws.load_backing(&fp) else {
                         let resp = Response::builder()
                             .status(StatusCode::NOT_FOUND)
+                            .header("Access-Control-Allow-Origin", "*")
                             .body(Cow::Borrowed(&b"PDF backing unavailable"[..]))
                             .unwrap();
                         responder.respond(resp);
@@ -3545,6 +3661,23 @@ fn main() {
                             .header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
                             .header("Cache-Control", "no-store")
                             .body(Cow::Borrowed(&b""[..]))
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    }
+
+                    // Query-parameter range (?start=0&end=65535): returns standard 200 OK with exact byte slice
+                    // (immune to macOS WKWebView custom-scheme Range header / 206 Partial Content quirks).
+                    if let Some((start, end_incl)) = parse_query_byte_range(query_owned.as_deref(), total_len) {
+                        let chunk = backing[(start as usize)..=(end_incl as usize)].to_vec();
+                        let chunk_len = chunk.len();
+                        let resp = Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, "application/octet-stream")
+                            .header("Content-Length", chunk_len.to_string())
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Cache-Control", "no-store")
+                            .body(Cow::Owned(chunk))
                             .unwrap();
                         responder.respond(resp);
                         return;
@@ -3917,6 +4050,10 @@ fn main() {
                 UserEvent::PerfBenchExit => {
                     window.set_visible(false);
                     *control_flow = ControlFlow::Exit;
+                }
+                #[cfg(target_os = "macos")]
+                UserEvent::RespondAsync(callback) => {
+                    callback();
                 }
             },
             #[cfg(target_os = "macos")]

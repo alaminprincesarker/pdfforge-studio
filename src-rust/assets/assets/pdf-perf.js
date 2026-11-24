@@ -27,10 +27,77 @@ const state = {
   bufferRadius: 2,
   pressureListeners: new Set(),
   statsListeners: new Set(),
-  fileMeta: new Map(), // filePath -> { fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium }
+  fileMeta: new Map(), // filePath -> { fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium, pdfiumAvailable }
   enginePerf: new Map(), // tabId -> { pdfjsAvg, pdfiumAvg, preferPdfium }
   lastScrollAt: 0,
+  pdfiumAvailable: true,
+  workerReadyPromise: null,
+  workerBlobUrl: null,
+  useFakeWorker: false,
 };
+
+function isCustomProtocol() {
+  return (
+    typeof window !== "undefined" &&
+    window.location &&
+    window.location.protocol !== "http:" &&
+    window.location.protocol !== "https:"
+  );
+}
+
+export function isPdfiumAvailable() {
+  return state.pdfiumAvailable;
+}
+
+export function disablePdfium() {
+  state.pdfiumAvailable = false;
+  state.enginePerf.forEach((ep) => {
+    ep.preferPdfium = false;
+  });
+}
+
+// On macOS WKWebView (pdfforge://localhost/), origin is opaque ("null"), so PDF.js's
+// cross-origin wrapper tries `await import("pdfforge://...")` inside a blob: worker which
+// WebKit blocks. Pre-inline the worker source into a self-contained Blob URL (or fall back
+// cleanly to main-thread pdfjsWorker if WebKit rejects module blob workers).
+export function ensureWorkerReady() {
+  if (state.workerReadyPromise) return state.workerReadyPromise;
+  state.workerReadyPromise = (async () => {
+    if (!isCustomProtocol()) return;
+    const pdfjs = window.__pdfforgePdfjs;
+    const workerUrl = new URL("./assets/pdf.worker.min-D6GDQ74a.mjs", window.location.href).href;
+    try {
+      const res = await fetch(workerUrl);
+      if (!res.ok) throw new Error(`Worker fetch HTTP ${res.status}`);
+      const code = await res.text();
+      const blobUrl = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+      // Verify WebKit actually accepts module Blob Workers before committing
+      let blobWorks = false;
+      try {
+        const probe = new Worker(blobUrl, { type: "module" });
+        probe.terminate();
+        blobWorks = true;
+      } catch {
+        blobWorks = false;
+      }
+      if (blobWorks && pdfjs && pdfjs.GlobalWorkerOptions) {
+        state.workerBlobUrl = blobUrl;
+        pdfjs.GlobalWorkerOptions.workerSrc = blobUrl;
+        return;
+      }
+      URL.revokeObjectURL(blobUrl);
+    } catch {}
+    // Bulletproof fallback: load worker module directly on main thread (PDF.js built-in fake worker)
+    try {
+      const mod = await import(workerUrl);
+      if (mod && mod.WorkerMessageHandler) {
+        globalThis.pdfjsWorker = mod;
+        state.useFakeWorker = true;
+      }
+    } catch {}
+  })();
+  return state.workerReadyPromise;
+}
 
 export function markScrollingNow() {
   state.lastScrollAt = Date.now();
@@ -89,8 +156,10 @@ export function getConfig() {
 
 // --- Shared PDF.js Worker Pool (2..4 workers by CPU cores) ---
 export function getSharedWorker() {
+  if (state.useFakeWorker) return undefined;
   const pdfjs = window.__pdfforgePdfjs;
   if (!pdfjs || typeof pdfjs.PDFWorker !== "function") return undefined;
+  if (isCustomProtocol() && !state.workerBlobUrl) return undefined;
   state.workers = state.workers.filter((w) => w && !w.destroyed);
   const cores = typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
   const targetCount = cores >= 4 ? 2 : 1;
@@ -122,35 +191,54 @@ export async function createStreamingSource(filePath, optsOrCb) {
   if (signal && signal.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
-  const { url, size, disableAutoFetch, heavyHint, fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium } = reg;
+  const { url, size, disableAutoFetch, heavyHint, fileHash, numPages, page1Width, page1Height, isLinearized, preferPdfium, pdfiumAvailable } = reg;
   if (!size || size <= 0) {
     throw new Error("PDF file is empty or unreadable (0 bytes).");
   }
+  if (pdfiumAvailable === false) {
+    state.pdfiumAvailable = false;
+  }
+  const canUsePdfium = pdfiumAvailable !== false && state.pdfiumAvailable;
   state.fileMeta.set(filePath, {
     fileHash: fileHash || "",
     numPages: numPages || 0,
     page1Width: page1Width || 0,
     page1Height: page1Height || 0,
     isLinearized: !!isLinearized,
-    preferPdfium: !!preferPdfium,
+    preferPdfium: canUsePdfium && !!preferPdfium,
+    pdfiumAvailable: canUsePdfium,
     size,
     revision: reg.revision || 1,
   });
+  const useQueryRange = isCustomProtocol();
+  const buildRangeFetch = (begin, endIncl, sig) => {
+    if (useQueryRange) {
+      const sep = url.includes("?") ? "&" : "?";
+      return fetch(`${url}${sep}start=${begin}&end=${endIncl}`, {
+        method: "GET",
+        signal: sig,
+      });
+    }
+    return fetch(url, {
+      method: "GET",
+      headers: { Range: `bytes=${begin}-${endIncl}` },
+      signal: sig,
+    });
+  };
   const chunkBytes = Math.min(65536, size);
   const headCtrl = new AbortController();
   const onAbortHead = () => headCtrl.abort();
   if (signal) signal.addEventListener("abort", onAbortHead, { once: true });
   let initialData;
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { Range: `bytes=0-${chunkBytes - 1}` },
-      signal: headCtrl.signal,
-    });
+    const res = await buildRangeFetch(0, chunkBytes - 1, headCtrl.signal);
     if (!res.ok && res.status !== 206) {
       throw new Error(`Stream read failed (${res.status})`);
     }
     initialData = new Uint8Array(await res.arrayBuffer());
+    if (initialData.byteLength === 0) {
+      throw new Error("Stream returned empty initial chunk");
+    }
   } finally {
     if (signal) signal.removeEventListener("abort", onAbortHead);
   }
@@ -171,11 +259,7 @@ export async function createStreamingSource(filePath, optsOrCb) {
       const ctrl = new AbortController();
       this._controllers.add(ctrl);
       const endIncl = Math.max(begin, Math.min(this.length - 1, end - 1));
-      fetch(url, {
-        method: "GET",
-        headers: { Range: `bytes=${begin}-${endIncl}` },
-        signal: ctrl.signal,
-      })
+      buildRangeFetch(begin, endIncl, ctrl.signal)
         .then((r) => {
           if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
           return r.arrayBuffer();
@@ -217,8 +301,9 @@ export async function createStreamingSource(filePath, optsOrCb) {
     url,
     size,
     disableAutoFetch: !!disableAutoFetch,
-    heavyHint: !!heavyHint,
-    preferPdfium: !!preferPdfium,
+    heavyHint: canUsePdfium && !!heavyHint,
+    preferPdfium: canUsePdfium && !!preferPdfium,
+    pdfiumAvailable: canUsePdfium,
     isLinearized: !!isLinearized,
     fileHash: fileHash || "",
     numPages: numPages || 0,
@@ -233,9 +318,11 @@ export function getFileMeta(filePath) {
 }
 
 export function shouldUsePdfium(tabId, filePath, fallbackHeavy = false) {
+  if (!state.pdfiumAvailable) return false;
   const ep = state.enginePerf.get(tabId);
   if (ep && typeof ep.preferPdfium === "boolean") return ep.preferPdfium;
   const meta = filePath ? state.fileMeta.get(filePath) : null;
+  if (meta && meta.pdfiumAvailable === false) return false;
   if (meta && meta.preferPdfium) return true;
   return !!fallbackHeavy;
 }
@@ -306,12 +393,31 @@ export function putDiskCachedBitmap(filePath, rev, page, canvasOrBmp, widthPx, r
     );
   };
   try {
-    if (typeof OffscreenCanvas !== "undefined" && canvasOrBmp instanceof ImageBitmap) {
+    const isWebKit =
+      typeof navigator !== "undefined" &&
+      /AppleWebKit/i.test(navigator.userAgent || "") &&
+      !/Chrome|Chromium|Edg/i.test(navigator.userAgent || "");
+    if (!isWebKit && typeof OffscreenCanvas !== "undefined" && canvasOrBmp instanceof ImageBitmap) {
       const oc = new OffscreenCanvas(canvasOrBmp.width, canvasOrBmp.height);
       const octx = oc.getContext("2d", { alpha: false });
       if (octx) {
         octx.drawImage(canvasOrBmp, 0, 0);
         oc.convertToBlob({ type: "image/png" }).then(sendBlob).catch(() => {});
+        return;
+      }
+    }
+    if (canvasOrBmp instanceof ImageBitmap && typeof document !== "undefined") {
+      const c2 = document.createElement("canvas");
+      c2.width = canvasOrBmp.width;
+      c2.height = canvasOrBmp.height;
+      const ctx2 = c2.getContext("2d", { alpha: false });
+      if (ctx2) {
+        ctx2.drawImage(canvasOrBmp, 0, 0);
+        c2.toBlob((bl) => {
+          c2.width = 0;
+          c2.height = 0;
+          sendBlob(bl);
+        }, "image/png");
         return;
       }
     }
@@ -940,6 +1046,9 @@ const PerfAPI = {
   onMemoryPressure,
   getBufferRadius,
   getSharedWorker,
+  ensureWorkerReady,
+  isPdfiumAvailable,
+  disablePdfium,
   createStreamingSource,
   getFileMeta,
   shouldUsePdfium,

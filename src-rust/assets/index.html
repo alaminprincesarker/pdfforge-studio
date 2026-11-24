@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self' 'unsafe-inline' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' blob: data:;"
+      content="default-src 'self' pdfforge: 'unsafe-inline' blob: data:; script-src 'self' pdfforge: 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' pdfforge: 'unsafe-inline'; font-src 'self' pdfforge: data:; img-src 'self' pdfforge: data: blob:; worker-src 'self' pdfforge: blob:; connect-src 'self' pdfforge: blob: data:;"
     />
     <title>PDFForge</title>
     <!-- Preload PDF.js worker so the worker pool warms up immediately -->
@@ -212,8 +212,14 @@
           document.head.appendChild(st);
         } catch (_) {}
         try {
-          // Pre-warm PDF.js worker right after first paint so first PDF opens without worker spin-up delay
-          if (window.__pdfforgePerf && window.__pdfforgePerf.getSharedWorker) {
+          // Pre-warm PDF.js worker right after first paint (on macOS pdfforge://, prepares self-contained Blob worker)
+          if (window.__pdfforgePerf && window.__pdfforgePerf.ensureWorkerReady) {
+            window.__pdfforgePerf.ensureWorkerReady().then(() => {
+              if (window.__pdfforgePerf && window.__pdfforgePerf.getSharedWorker) {
+                window.__pdfforgePerf.getSharedWorker();
+              }
+            }).catch(() => {});
+          } else if (window.__pdfforgePerf && window.__pdfforgePerf.getSharedWorker) {
             window.__pdfforgePerf.getSharedWorker();
           }
         } catch (_) {}
