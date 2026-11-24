@@ -208,7 +208,6 @@ mod win32_frame {
     }
 }
 
-#[derive(Debug, Clone)]
 enum UserEvent {
     ShowMainWindow,
     Minimize,
