@@ -3742,11 +3742,28 @@ export function mountAcrobatPageSurface(opts) {
     renderShapeOverlays();
   }
 
-  // Defer initial IPC fetch slightly so fast scrolling skips unmounted pages with zero wasted Rust work
-  refreshTimer = setTimeout(() => {
+  // Defer initial IPC fetch so visible page rendering wins the Rust PDFium lock first
+  // and fast scrolling skips unmounted pages with zero wasted Rust work.
+  const scheduleInitialRefresh = () => {
+    const perf = window.__pdfforgePerf;
+    if (destroyed) return;
+    if (!isEditTool(getTool()) && perf && perf.isRecentlyScrolling && perf.isRecentlyScrolling(320)) {
+      refreshTimer = setTimeout(scheduleInitialRefresh, 260);
+      return;
+    }
     refreshTimer = null;
-    if (!destroyed) refreshAll(false);
-  }, isEditTool(getTool()) ? 16 : 220);
+    refreshAll(false);
+  };
+  const initMeta =
+    window.__pdfforgePerf && window.__pdfforgePerf.getFileMeta
+      ? window.__pdfforgePerf.getFileMeta(filePath)
+      : null;
+  const initDelayMs = isEditTool(getTool())
+    ? 16
+    : initMeta && initMeta.size > 20 * 1024 * 1024
+      ? 420
+      : 220;
+  refreshTimer = setTimeout(scheduleInitialRefresh, initDelayMs);
 
   const api = {
     getPage: () => page,

@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use unicode_bidi::BidiInfo;
+
+static BG_PNG_ENCODE_THREADS: AtomicUsize = AtomicUsize::new(0);
+const MAX_BG_PNG_ENCODE_THREADS: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,11 +219,18 @@ fn open_mmap_or_bytes(file_path: &str) -> Result<PdfBacking, String> {
     let meta = f
         .metadata()
         .map_err(|e| format!("Failed reading PDF metadata '{}': {}", file_path, e))?;
-    if meta.len() == 0 {
+    let file_len = meta.len();
+    if file_len == 0 {
         return Err("PDF file is empty (0 bytes)".to_string());
     }
     if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&f) } {
         return Ok(PdfBacking::Mmap(Arc::new(mmap)));
+    }
+    if file_len > 256 * 1024 * 1024 {
+        return Err(format!(
+            "Failed memory-mapping large PDF ({:.1} MB); refusing full in-RAM fallback to avoid OOM",
+            file_len as f64 / (1024.0 * 1024.0)
+        ));
     }
     let disk_bytes = std::fs::read(file_path)
         .map_err(|e| format!("Failed reading PDF '{}': {}", file_path, e))?;
@@ -292,13 +303,13 @@ impl RustPageRenderCache {
     }
 
     pub fn set_budget_bytes(&self, budget_bytes: usize) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.budget_bytes = budget_bytes.clamp(64 * 1024 * 1024, 2048 * 1024 * 1024);
         Self::evict_to_budget(&mut g);
     }
 
     pub fn stats(&self) -> (usize, usize) {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         (g.entries.len(), g.total_bytes)
     }
 
@@ -316,7 +327,7 @@ impl RustPageRenderCache {
     }
 
     pub fn get(&self, key: &RustRenderCacheKey) -> Option<Arc<Vec<u8>>> {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = g.entries.get(key).cloned() {
             g.lru_order.retain(|k| k != key);
             g.lru_order.push_back(key.clone());
@@ -327,7 +338,7 @@ impl RustPageRenderCache {
 
     pub fn insert(&self, key: RustRenderCacheKey, data: Arc<Vec<u8>>) {
         let sz = data.len();
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if sz > g.budget_bytes {
             return;
         }
@@ -342,7 +353,7 @@ impl RustPageRenderCache {
     }
 
     pub fn evict_doc(&self, doc_key: &str) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let keys: Vec<RustRenderCacheKey> = g
             .entries
             .keys()
@@ -359,7 +370,7 @@ impl RustPageRenderCache {
 
     #[allow(dead_code)]
     pub fn clear(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.entries.clear();
         g.lru_order.clear();
         g.total_bytes = 0;
@@ -500,13 +511,13 @@ impl PdfWorkspaceEngine {
     pub fn load_backing(&self, file_path: &str) -> Result<(PdfBacking, u64, bool), String> {
         let key = Self::normalize_key(file_path);
         {
-            let guard = self.docs.lock().unwrap();
+            let guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(doc) = guard.get(&key) {
                 return Ok((doc.backing.clone(), doc.revision, doc.is_dirty));
             }
         }
         let backing = open_mmap_or_bytes(file_path)?;
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.entry(key).or_insert_with(|| WorkingDocument {
             canonical_key: file_path.to_string(),
             disk_path: Some(file_path.to_string()),
@@ -538,20 +549,22 @@ impl PdfWorkspaceEngine {
             return Err("Requested byte range out of bounds".to_string());
         }
         let clamped_end = end_incl.min(total - 1);
-        let slice = &backing[(start as usize)..=(clamped_end as usize)];
+        let slice = backing
+            .get((start as usize)..=(clamped_end as usize))
+            .ok_or_else(|| "Requested byte range out of bounds".to_string())?;
         Ok((slice.to_vec(), total, rev, dirty))
     }
 
     pub fn close_document(&self, file_path: &str) {
         let key = Self::normalize_key(file_path);
-        self.docs.lock().unwrap().remove(&key);
+        self.docs.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         self.render_cache.evict_doc(&key);
     }
 
     pub fn suspend_document(&self, file_path: &str) {
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let should_remove = if let Some(doc) = guard.get_mut(&key) {
             doc.layout_cache.clear();
             doc.layout_order.clear();
@@ -569,7 +582,7 @@ impl PdfWorkspaceEngine {
     /// Drops active Mmap handle pointing to `target_path` so Windows save-in-place never hits file lock.
     pub fn unmap_for_save(&self, target_path: &str) {
         let target_key = Self::normalize_key(target_path);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(doc) = guard.get_mut(&target_key) {
             if doc.backing.is_mmap() {
                 if let Ok(vec_bytes) = std::fs::read(target_path) {
@@ -832,7 +845,11 @@ impl PdfWorkspaceEngine {
                 cfg = cfg.set_origin(-tx, -ty);
             }
 
-            let mut buf = vec![255u8; (tw as usize) * (th as usize) * 4];
+            let buf_len = (tw as usize)
+                .checked_mul(th as usize)
+                .and_then(|p| p.checked_mul(4))
+                .ok_or_else(|| "Render bitmap dimensions overflow".to_string())?;
+            let mut buf = vec![255u8; buf_len];
             let mut bitmap = PdfBitmap::from_bytes(
                 tw as i32,
                 th as i32,
@@ -850,22 +867,31 @@ impl PdfWorkspaceEngine {
         let arc_bmp = Arc::new(bmp_bytes);
         self.render_cache.insert(cache_key, arc_bmp.clone());
 
-        // Persist compressed PNG to %LOCALAPPDATA%\PDFForge\cache in background (never blocks caller!)
+        // Persist compressed PNG to %LOCALAPPDATA%\PDFForge\cache in background (bounded concurrency so
+        // fast scrolling across huge PDFs never spawns unbounded PNG encoding threads / RAM spikes).
         if let Some(fh) = file_hash {
-            let p_one = page_one.max(1);
-            std::thread::spawn(move || {
-                if let Ok(png) = encode_bgra_to_png(tw, th, &bgra) {
-                    crate::disk_cache::write_cached_render_async(
-                        fh,
-                        revision,
-                        p_one,
-                        zoom_bucket,
-                        norm_rot,
-                        is_thumb,
-                        png,
-                    );
-                }
-            });
+            if BG_PNG_ENCODE_THREADS.fetch_add(1, Ordering::AcqRel) < MAX_BG_PNG_ENCODE_THREADS {
+                let p_one = page_one.max(1);
+                std::thread::spawn(move || {
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Ok(png) = encode_bgra_to_png(tw, th, &bgra) {
+                            crate::disk_cache::write_cached_render_async(
+                                fh,
+                                revision,
+                                p_one,
+                                zoom_bucket,
+                                norm_rot,
+                                is_thumb,
+                                png,
+                            );
+                        }
+                    }));
+                    let _ = res;
+                    BG_PNG_ENCODE_THREADS.fetch_sub(1, Ordering::AcqRel);
+                });
+            } else {
+                BG_PNG_ENCODE_THREADS.fetch_sub(1, Ordering::AcqRel);
+            }
         }
 
         Ok((arc_bmp, "image/bmp"))
@@ -960,7 +986,7 @@ impl PdfWorkspaceEngine {
         let key = Self::normalize_key(file_path);
         let backing = open_mmap_or_bytes(file_path)?;
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(
             key,
             WorkingDocument {
@@ -985,7 +1011,7 @@ impl PdfWorkspaceEngine {
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
         let arc_bytes = Arc::new(bytes.clone());
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(
             key,
             WorkingDocument {
@@ -1036,7 +1062,7 @@ impl PdfWorkspaceEngine {
 
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get_mut(&key).ok_or("Missing working document")?;
         let max_undo = Self::max_undo_steps_for_len(new_bytes.len());
         entry.undo_stack.push(entry.backing.clone());
@@ -1067,7 +1093,7 @@ impl PdfWorkspaceEngine {
         let _ = self.load_backing(file_path)?;
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get_mut(&key).ok_or("Missing working document")?;
         let max_undo = Self::max_undo_steps_for_len(new_bytes.len());
         entry.undo_stack.push(entry.backing.clone());
@@ -1101,7 +1127,7 @@ impl PdfWorkspaceEngine {
         let (backing, orig_disk_bytes, disk_path_opt) = {
             let _ = self.load_backing(file_path)?;
             let key = Self::normalize_key(file_path);
-            let guard = self.docs.lock().unwrap();
+            let guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             let entry = guard.get(&key).ok_or("Missing working document")?;
             (
                 entry.backing.clone(),
@@ -1118,7 +1144,7 @@ impl PdfWorkspaceEngine {
         let dst_key = Self::normalize_key(target_path);
         let src_key = Self::normalize_key(file_path);
         if dst_key == src_key {
-            let mut guard = self.docs.lock().unwrap();
+            let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&src_key) {
                 if entry.backing.is_mmap() {
                     entry.backing = PdfBacking::Bytes(Arc::new(backing.to_vec()));
@@ -1142,7 +1168,7 @@ impl PdfWorkspaceEngine {
         let next_backing = open_mmap_or_bytes(target_path)
             .unwrap_or_else(|_| PdfBacking::Bytes(Arc::new(saved_bytes)));
 
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let next_rev = if dst_key == src_key {
             if let Some(entry) = guard.get_mut(&src_key) {
                 entry.disk_path = Some(target_path.to_string());
@@ -1201,7 +1227,7 @@ impl PdfWorkspaceEngine {
 
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get_mut(&key).ok_or("Missing working document")?;
         let max_undo = Self::max_undo_steps_for_len(new_bytes.len());
         entry.undo_stack.push(entry.backing.clone());
@@ -1227,7 +1253,7 @@ impl PdfWorkspaceEngine {
     pub fn undo(&self, file_path: &str) -> Result<(Vec<u8>, u64, bool, bool), String> {
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get_mut(&key).ok_or("Document not loaded")?;
         let prev = entry.undo_stack.pop().ok_or("Nothing to undo")?;
         entry.redo_stack.push(entry.backing.clone());
@@ -1249,7 +1275,7 @@ impl PdfWorkspaceEngine {
     pub fn redo(&self, file_path: &str) -> Result<(Vec<u8>, u64, bool, bool), String> {
         let key = Self::normalize_key(file_path);
         self.render_cache.evict_doc(&key);
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.get_mut(&key).ok_or("Document not loaded")?;
         let next = entry.redo_stack.pop().ok_or("Nothing to redo")?;
         entry.undo_stack.push(entry.backing.clone());
@@ -1276,7 +1302,7 @@ impl PdfWorkspaceEngine {
         let page = page.max(1);
         let key = Self::normalize_key(file_path);
         {
-            let guard = self.docs.lock().unwrap();
+            let guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(doc) = guard.get(&key) {
                 if let Some(cached) = doc.objects_cache.get(&page) {
                     return Ok(cached.clone());
@@ -1289,7 +1315,7 @@ impl PdfWorkspaceEngine {
             .map_err(|e| format!("Failed parsing PDF objects: {}", e))?;
         let parsed = Arc::new(parse_page_objects(&lo_doc, page - 1)?);
 
-        let mut guard = self.docs.lock().unwrap();
+        let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(doc) = guard.get_mut(&key) {
             doc.objects_order.retain(|p| *p != page);
             doc.objects_order.push_back(page);
@@ -1307,7 +1333,7 @@ impl PdfWorkspaceEngine {
         let page = page.max(1);
         let key = Self::normalize_key(file_path);
         {
-            let guard = self.docs.lock().unwrap();
+            let guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(doc) = guard.get(&key) {
                 if let Some(cached) = doc.layout_cache.get(&page) {
                     return Ok(cached.clone());
@@ -1315,22 +1341,28 @@ impl PdfWorkspaceEngine {
             }
         }
 
-        let (backing, _, _) = self.load_backing(file_path)?;
+        let (backing, _, is_dirty) = self.load_backing(file_path)?;
         let backing_len = backing.len();
         let objs = if backing_len <= 2_500_000 {
             self.get_objects(file_path, page).ok()
         } else {
             None
         };
-        let layout = Arc::new(extract_page_layout_from_bytes(
+        let disk_path = if !is_dirty && std::path::Path::new(file_path).is_file() {
+            Some(file_path)
+        } else {
+            None
+        };
+        let layout = Arc::new(extract_page_layout_impl(
             &backing,
+            disk_path,
             page,
             objs.as_deref(),
         )?);
 
         let num_pages = layout.num_pages;
         {
-            let mut guard = self.docs.lock().unwrap();
+            let mut guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(doc) = guard.get_mut(&key) {
                 doc.layout_order.retain(|p| *p != page);
                 doc.layout_order.push_back(page);
@@ -1350,7 +1382,7 @@ impl PdfWorkspaceEngine {
             let path_clone = file_path.to_string();
             let key_clone = key.clone();
             let already_cached = {
-                let guard = self.docs.lock().unwrap();
+                let guard = self.docs.lock().unwrap_or_else(|e| e.into_inner());
                 guard
                     .get(&key_clone)
                     .map(|d| d.layout_cache.contains_key(&next_page))
@@ -1537,11 +1569,14 @@ pub fn compute_selection_rects(
             had_line_in_blk = true;
             let mut first_in_line = true;
 
-            let line_lo = lo.max(ln.start_char);
-            let line_hi = hi.min(ln.end_char);
+            let line_lo = lo.max(ln.start_char).min(layout.chars.len() - 1);
+            let line_hi = hi.min(ln.end_char).min(layout.chars.len() - 1);
+            if line_lo > line_hi {
+                continue;
+            }
             let mut cur_rect: Option<[f32; 4]> = None;
 
-            for c in &layout.chars[line_lo..=line_hi] {
+            for c in layout.chars.get(line_lo..=line_hi).unwrap_or(&[]) {
                 if !first_in_line && c.unicode == "\n" {
                     continue;
                 }
@@ -1623,16 +1658,22 @@ fn find_char_at_point(layout: &PageLayout, x: f32, y: f32) -> Option<usize> {
     }
 
     if let Some((ln, _)) = best_line {
-        return layout.chars[ln.start_char..=ln.end_char]
-            .iter()
-            .min_by(|a, b| {
-                let da = ((a.bbox[0] + a.bbox[2] * 0.5) - x)
-                    .hypot((a.bbox[1] + a.bbox[3] * 0.5) - y);
-                let db = ((b.bbox[0] + b.bbox[2] * 0.5) - x)
-                    .hypot((b.bbox[1] + b.bbox[3] * 0.5) - y);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|c| c.index);
+        let lo = ln.start_char.min(layout.chars.len() - 1);
+        let hi = ln.end_char.min(layout.chars.len() - 1);
+        if lo <= hi {
+            if let Some(slice) = layout.chars.get(lo..=hi) {
+                return slice
+                    .iter()
+                    .min_by(|a, b| {
+                        let da = ((a.bbox[0] + a.bbox[2] * 0.5) - x)
+                            .hypot((a.bbox[1] + a.bbox[3] * 0.5) - y);
+                        let db = ((b.bbox[0] + b.bbox[2] * 0.5) - x)
+                            .hypot((b.bbox[1] + b.bbox[3] * 0.5) - y);
+                        da.total_cmp(&db)
+                    })
+                    .map(|c| c.index);
+            }
+        }
     }
 
     // 3. Nearest overall within 36pt radius
@@ -1669,6 +1710,16 @@ pub fn extract_page_layout_from_bytes(
     page_num_one: usize,
     objects_opt: Option<&PageObjectsResult>,
 ) -> Result<PageLayout, String> {
+    extract_page_layout_impl(bytes, None, page_num_one, objects_opt)
+}
+
+fn extract_page_layout_impl(
+    bytes: &[u8],
+    disk_path: Option<&str>,
+    page_num_one: usize,
+    objects_opt: Option<&PageObjectsResult>,
+) -> Result<PageLayout, String> {
+    let page_num_one = page_num_one.max(1);
     // Only parse full lopdf AST for embedded-font metadata on compact PDFs (<= 2.5 MB).
     // On large PDFs, derive exact PageTransform directly from PDFium to prevent 500MB+ RSS spikes!
     let mut embedded_font_status: HashMap<String, (bool, bool)> = HashMap::new();
@@ -1708,13 +1759,24 @@ pub fn extract_page_layout_from_bytes(
 
     let pdfium = get_pdfium()?;
     let pdfium_guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
-    let doc = pdfium_guard
-        .load_pdf_from_byte_slice(bytes, None)
-        .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?;
+    let doc = if let Some(fp) = disk_path {
+        pdfium_guard
+            .load_pdf_from_file(fp, None)
+            .or_else(|_| pdfium_guard.load_pdf_from_byte_slice(bytes, None))
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    } else {
+        pdfium_guard
+            .load_pdf_from_byte_slice(bytes, None)
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    };
     let num_pages = doc.pages().len() as usize;
+    if num_pages == 0 {
+        return Err("PDF contains 0 pages".to_string());
+    }
+    let page_idx = page_num_one.saturating_sub(1).min(num_pages - 1) as i32;
     let pg = doc
         .pages()
-        .get((page_num_one - 1) as i32)
+        .get(page_idx)
         .map_err(|e| format!("PDFium failed opening page {}: {:?}", page_num_one, e))?;
 
     let pt = pt_opt.unwrap_or_else(|| {
@@ -1724,8 +1786,10 @@ pub fn extract_page_layout_from_bytes(
             PdfPageRenderRotation::Degrees270 => 270,
             _ => 0,
         };
-        let w = pg.width().value.abs().max(1.0);
-        let h = pg.height().value.abs().max(1.0);
+        let raw_w = pg.width().value;
+        let raw_h = pg.height().value;
+        let w = if raw_w.is_finite() { raw_w.abs().max(1.0) } else { 612.0 };
+        let h = if raw_h.is_finite() { raw_h.abs().max(1.0) } else { 792.0 };
         // pg.width()/height() in PDFium already reflect /Rotate; unrotate back to CropBox if 90/270
         let (cw, ch) = if rot_deg == 90 || rot_deg == 270 { (h, w) } else { (w, h) };
         PageTransform::from_boxes([0.0, 0.0, cw, ch], rot_deg)
@@ -1887,12 +1951,18 @@ fn detect_column_gutters(chars: &[RawExtractedChar], vp_width: f32) -> Vec<f32> 
     let mut row_sets: Vec<HashSet<i32>> = vec![HashSet::new(); bins];
 
     for c in &visible {
+        if !c.baseline.is_finite() || !c.bbox[0].is_finite() || !c.bbox[2].is_finite() {
+            continue;
+        }
         // Bucket baseline Y into ~10pt lines so narrow char overlaps on one title line count as 1 row
         let row_bucket = (c.baseline / 10.0).round() as i32;
         let b0 = ((c.bbox[0] / bin_w).floor() as isize).clamp(0, bins as isize - 1) as usize;
         let b1 = (((c.bbox[0] + c.bbox[2]) / bin_w).floor() as isize).clamp(0, bins as isize - 1) as usize;
-        for set in &mut row_sets[b0..=b1] {
-            set.insert(row_bucket);
+        let (lo, hi) = if b0 <= b1 { (b0, b1) } else { (b1, b0) };
+        if let Some(slice) = row_sets.get_mut(lo..=hi) {
+            for set in slice {
+                set.insert(row_bucket);
+            }
         }
     }
 
@@ -1953,20 +2023,27 @@ fn build_structured_layout(
         baseline: f32,
         rotation: f32,
         font_size: f32,
+        min_x: f32,
+        max_x: f32,
     }
 
-    // Sort initially by baseline Y then X to cluster lines robustly even when PDF stream order is scrambled
+    fn quantize_bucket(v: f32, step: f32) -> i64 {
+        if v.is_finite() {
+            (v / step).round().clamp(-1e12, 1e12) as i64
+        } else {
+            0
+        }
+    }
+
+    // Sort initially using a strict, transitive total order (quantized baseline/rotation buckets + total_cmp).
+    // Avoids non-transitive epsilon comparators that panic under Rust's driftsort total-order checks.
     let mut sorted = raw_chars;
     sorted.sort_by(|a, b| {
-        if (a.baseline - b.baseline).abs() <= 2.5 && (a.rotation - b.rotation).abs() <= 10.0 {
-            a.center_x
-                .partial_cmp(&b.center_x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            a.baseline
-                .partial_cmp(&b.baseline)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }
+        quantize_bucket(a.baseline, 2.5)
+            .cmp(&quantize_bucket(b.baseline, 2.5))
+            .then_with(|| quantize_bucket(a.rotation, 15.0).cmp(&quantize_bucket(b.rotation, 15.0)))
+            .then_with(|| a.center_x.total_cmp(&b.center_x))
+            .then_with(|| a.baseline.total_cmp(&b.baseline))
     });
 
     let mut temp_lines: Vec<TempLine> = Vec::new();
@@ -1980,19 +2057,30 @@ fn build_structured_layout(
             0
         };
         let rot_group = (ch.rotation / 15.0).round();
+        let ch_left = ch.bbox[0];
+        let ch_right = ch.bbox[0] + ch.bbox[2].max(0.0);
 
         // Try matching existing line fragment
         let mut target_idx: Option<usize> = None;
         for (li, tl) in temp_lines.iter().enumerate().rev() {
+            if ch.rotation.abs() < 15.0 && tl.rotation.abs() < 15.0 && (ch.baseline - tl.baseline) > 48.0 {
+                // Sorted by ascending quantized baseline buckets; older lines are far above
+                break;
+            }
             let tl_rot_group = (tl.rotation / 15.0).round();
             if (rot_group - tl_rot_group).abs() > 0.5 {
                 continue;
             }
+            let horiz_gap = if ch_left > tl.max_x {
+                ch_left - tl.max_x
+            } else if tl.min_x > ch_right {
+                tl.min_x - ch_right
+            } else {
+                0.0
+            };
             if ch.rotation.abs() < 15.0 && tl.column_idx != c_col {
                 // Allow single full-width spanning lines only if spanning across gutter continuously
-                let last_x = tl.items.last().map(|p| p.bbox[0] + p.bbox[2]).unwrap_or(0.0);
-                let gap = (ch.bbox[0] - last_x).abs();
-                if gap > ch.font_size.max(8.0) * 1.6 {
+                if horiz_gap > ch.font_size.max(8.0) * 1.6 {
                     continue;
                 }
             }
@@ -2007,8 +2095,7 @@ fn build_structured_layout(
                     }
                 }
             } else if (ch.baseline - tl.baseline).abs() <= base_tol {
-                let last_x = tl.items.last().map(|p| p.bbox[0] + p.bbox[2]).unwrap_or(0.0);
-                if (ch.bbox[0] - last_x) <= ch.font_size.max(8.0) * 2.4 {
+                if horiz_gap <= ch.font_size.max(8.0) * 2.4 {
                     target_idx = Some(li);
                     break;
                 }
@@ -2020,6 +2107,8 @@ fn build_structured_layout(
             let n = tl.items.len() as f32;
             tl.baseline = (tl.baseline * n + ch.baseline) / (n + 1.0);
             tl.font_size = tl.font_size.max(ch.font_size);
+            tl.min_x = tl.min_x.min(ch_left);
+            tl.max_x = tl.max_x.max(ch_right);
             tl.items.push(ch);
         } else {
             temp_lines.push(TempLine {
@@ -2027,6 +2116,8 @@ fn build_structured_layout(
                 baseline: ch.baseline,
                 rotation: ch.rotation,
                 font_size: ch.font_size,
+                min_x: ch_left,
+                max_x: ch_right,
                 items: vec![ch],
             });
         }
@@ -2035,42 +2126,31 @@ fn build_structured_layout(
     // Sort lines in reading order: spanning titles above columns first, then column-by-column top to bottom
     for tl in &mut temp_lines {
         if tl.rotation.abs() < 15.0 {
-            tl.items.sort_by(|a, b| {
-                a.bbox[0]
-                    .partial_cmp(&b.bbox[0])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            tl.items.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));
         }
     }
 
     // Compute top Y where column split begins
     let first_col1_y = temp_lines
         .iter()
-        .filter(|l| l.column_idx > 0)
+        .filter(|l| l.column_idx > 0 && l.baseline.is_finite())
         .map(|l| l.baseline)
         .fold(f32::INFINITY, f32::min);
 
     temp_lines.sort_by(|a, b| {
         let a_above = gutters.is_empty() || a.baseline < first_col1_y - 24.0;
         let b_above = gutters.is_empty() || b.baseline < first_col1_y - 24.0;
-        if a_above && b_above {
-            return a
-                .baseline
-                .partial_cmp(&b.baseline)
-                .unwrap_or(std::cmp::Ordering::Equal);
-        }
-        if a_above != b_above {
-            return if a_above {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            };
-        }
-        a.column_idx.cmp(&b.column_idx).then_with(|| {
-            a.baseline
-                .partial_cmp(&b.baseline)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        (!a_above)
+            .cmp(&(!b_above))
+            .then_with(|| {
+                if a_above {
+                    a.baseline.total_cmp(&b.baseline)
+                } else {
+                    a.column_idx
+                        .cmp(&b.column_idx)
+                        .then_with(|| a.baseline.total_cmp(&b.baseline))
+                }
+            })
     });
 
     // 2. Finalize Chars (handling Unicode Bidi RTL + Bangla graphemes), Words & Lines

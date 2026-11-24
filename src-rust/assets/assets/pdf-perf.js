@@ -259,27 +259,41 @@ export async function createStreamingSource(filePath, optsOrCb) {
       const ctrl = new AbortController();
       this._controllers.add(ctrl);
       const endIncl = Math.max(begin, Math.min(this.length - 1, end - 1));
-      buildRangeFetch(begin, endIncl, ctrl.signal)
-        .then((r) => {
-          if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
-          return r.arrayBuffer();
-        })
-        .then((buf) => {
-          if (this._aborted || (signal && signal.aborted)) return;
-          const chunk = new Uint8Array(buf);
-          this._loaded = Math.min(this.length, this._loaded + chunk.byteLength);
-          this.onDataRange(begin, chunk);
-          this.onDataProgress(this._loaded, this.length);
-          if (typeof onProgress === "function") {
+      const attemptFetch = (retriesLeft) =>
+        buildRangeFetch(begin, endIncl, ctrl.signal)
+          .then((r) => {
+            if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
+            return r.arrayBuffer();
+          })
+          .then((buf) => {
+            if (this._aborted || (signal && signal.aborted)) return;
+            const chunk = new Uint8Array(buf);
+            if (chunk.byteLength === 0) throw new Error("Empty range chunk");
+            this._loaded = Math.min(this.length, this._loaded + chunk.byteLength);
+            this.onDataRange(begin, chunk);
+            this.onDataProgress(this._loaded, this.length);
+            if (typeof onProgress === "function") {
+              try {
+                onProgress({ loaded: this._loaded, total: this.length });
+              } catch {}
+            }
+          })
+          .catch((err) => {
+            if (this._aborted || (signal && signal.aborted) || (err && err.name === "AbortError")) return;
+            if (retriesLeft > 0) {
+              return new Promise((res) => setTimeout(res, 120)).then(() => {
+                if (!this._aborted && !(signal && signal.aborted)) {
+                  return attemptFetch(retriesLeft - 1);
+                }
+              });
+            }
             try {
-              onProgress({ loaded: this._loaded, total: this.length });
+              console.error(`RangeTransport fetch failed [${begin}-${endIncl}]:`, err);
             } catch {}
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          this._controllers.delete(ctrl);
-        });
+          });
+      attemptFetch(2).finally(() => {
+        this._controllers.delete(ctrl);
+      });
     }
     abort() {
       this._aborted = true;

@@ -211,7 +211,7 @@ pub fn clear_disk_cache() -> DiskCacheStats {
         }
     }
     if let Some(mem) = SEARCH_INDEX_MEM.get() {
-        let mut g = mem.lock().unwrap();
+        let mut g = mem.lock().unwrap_or_else(|e| e.into_inner());
         g.entries.clear();
         g.order.clear();
     }
@@ -318,7 +318,7 @@ pub fn search_file_indexed(
     // 1. Check in-RAM hot LRU cache first (<1ms repeat searches!)
     let mut cache_hit = false;
     let index_arc = {
-        let mut g = search_mem().lock().unwrap();
+        let mut g = search_mem().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = g.entries.get(&mem_key).cloned() {
             cache_hit = true;
             g.order.retain(|k| k != &mem_key);
@@ -376,7 +376,7 @@ pub fn search_file_indexed(
                 Arc::new(idx)
             };
 
-            let mut g = search_mem().lock().unwrap();
+            let mut g = search_mem().lock().unwrap_or_else(|e| e.into_inner());
             g.entries.insert(mem_key.clone(), built.clone());
             g.order.push_back(mem_key.clone());
             while g.order.len() > 6 {

@@ -1366,8 +1366,13 @@ pub fn inspect_page_scan_status(
     file_path: &str,
     page_one: usize,
 ) -> Result<ScanDetectResult, String> {
-    let (backing, _, _) = ws.load_backing(file_path)?;
-    inspect_page_scan_status_bytes(&backing, file_path, page_one)
+    let (backing, _, is_dirty) = ws.load_backing(file_path)?;
+    let disk_path = if !is_dirty && Path::new(file_path).is_file() {
+        Some(file_path)
+    } else {
+        None
+    };
+    inspect_page_scan_status_impl(&backing, disk_path, file_path, page_one)
 }
 
 pub fn inspect_page_scan_status_bytes(
@@ -1375,11 +1380,27 @@ pub fn inspect_page_scan_status_bytes(
     file_path: &str,
     page_one: usize,
 ) -> Result<ScanDetectResult, String> {
+    inspect_page_scan_status_impl(bytes, None, file_path, page_one)
+}
+
+fn inspect_page_scan_status_impl(
+    bytes: &[u8],
+    disk_path: Option<&str>,
+    file_path: &str,
+    page_one: usize,
+) -> Result<ScanDetectResult, String> {
     let pdfium = get_pdfium()?;
     let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
-    let doc = guard
-        .load_pdf_from_byte_slice(bytes, None)
-        .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?;
+    let doc = if let Some(fp) = disk_path {
+        guard
+            .load_pdf_from_file(fp, None)
+            .or_else(|_| guard.load_pdf_from_byte_slice(bytes, None))
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    } else {
+        guard
+            .load_pdf_from_byte_slice(bytes, None)
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    };
     let total_pages = doc.pages().len() as usize;
     if total_pages == 0 {
         return Err("PDF has 0 pages".into());
@@ -1428,12 +1449,19 @@ pub fn inspect_pages_range_status(
     file_path: &str,
     pages: &[usize],
 ) -> Result<RangeInspectResult, String> {
-    let (backing, _, _) = ws.load_backing(file_path)?;
+    let (backing, _, is_dirty) = ws.load_backing(file_path)?;
     let pdfium = get_pdfium()?;
     let guard = pdfium.lock().unwrap_or_else(|e| e.into_inner());
-    let doc = guard
-        .load_pdf_from_byte_slice(&backing, None)
-        .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?;
+    let doc = if !is_dirty && Path::new(file_path).is_file() {
+        guard
+            .load_pdf_from_file(file_path, None)
+            .or_else(|_| guard.load_pdf_from_byte_slice(&backing, None))
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    } else {
+        guard
+            .load_pdf_from_byte_slice(&backing, None)
+            .map_err(|e| format!("PDFium failed opening PDF: {:?}", e))?
+    };
     let total_pages = doc.pages().len() as usize;
 
     let mut scanned_pages = Vec::new();
@@ -2300,11 +2328,11 @@ impl OcrJobManager {
     }
 
     pub fn get_status(&self, job_id: &str) -> Option<OcrJobSnapshot> {
-        self.jobs.lock().unwrap().get(job_id).cloned()
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).get(job_id).cloned()
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
-        if let Some(flag) = self.cancels.lock().unwrap().get(job_id).cloned() {
+        if let Some(flag) = self.cancels.lock().unwrap_or_else(|e| e.into_inner()).get(job_id).cloned() {
             flag.store(true, Ordering::Relaxed);
             return true;
         }
@@ -2332,7 +2360,7 @@ impl OcrJobManager {
                 backup_ref,
             )?;
             let recognized = results.len();
-            let mut jg = self.jobs.lock().unwrap();
+            let mut jg = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             let snap = jg.get_mut(job_id).ok_or("Missing job")?;
             snap.status = "done".to_string();
             snap.percent = 100;
@@ -2347,7 +2375,7 @@ impl OcrJobManager {
             if let Some(ref bp) = partial.backup_path {
                 let _ = fs::remove_file(bp);
             }
-            let mut jg = self.jobs.lock().unwrap();
+            let mut jg = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             let snap = jg.get_mut(job_id).ok_or("Missing job")?;
             snap.status = "cancelled".to_string();
             snap.can_keep_partial = false;
@@ -2430,8 +2458,8 @@ impl OcrJobManager {
             backup_path: Some(backup_path.to_string_lossy().to_string()),
         };
 
-        self.jobs.lock().unwrap().insert(job_id.clone(), init_snap);
-        self.cancels.lock().unwrap().insert(job_id.clone(), cancel_flag.clone());
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(job_id.clone(), init_snap);
+        self.cancels.lock().unwrap_or_else(|e| e.into_inner()).insert(job_id.clone(), cancel_flag.clone());
 
         let mgr = self.clone();
         let jid = job_id.clone();
@@ -2475,7 +2503,7 @@ impl OcrJobManager {
 
             let total_n = target_pages.len().max(1);
             if skipped_count > 0 {
-                let mut g = mgr.jobs.lock().unwrap();
+                let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = g.get_mut(&jid) {
                     s.skipped_pages = skipped_count;
                     s.completed_pages = processed_count;
@@ -2499,7 +2527,7 @@ impl OcrJobManager {
                         break;
                     }
                     {
-                        let mut g = mgr.jobs.lock().unwrap();
+                        let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(s) = g.get_mut(&jid) {
                             s.current_page = p1;
                             s.message = format!(
@@ -2574,7 +2602,7 @@ impl OcrJobManager {
                 let pct = ((processed_count * 92) / total_n).clamp(3, 94) as u32;
                 let cur_p = results.last().map(|r| r.page_one).unwrap_or(target_pages[0]);
 
-                let mut g = mgr.jobs.lock().unwrap();
+                let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = g.get_mut(&jid) {
                     s.completed_pages = processed_count;
                     s.current_page = cur_p;
@@ -2587,13 +2615,13 @@ impl OcrJobManager {
             }
 
             if let Some(err) = fatal_err {
-                let mut g = mgr.jobs.lock().unwrap();
+                let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = g.get_mut(&jid) {
                     s.status = "error".to_string();
                     s.error = Some(err.clone());
                     s.message = err;
                 }
-                mgr.cancels.lock().unwrap().remove(&jid);
+                mgr.cancels.lock().unwrap_or_else(|e| e.into_inner()).remove(&jid);
                 return;
             }
 
@@ -2601,7 +2629,7 @@ impl OcrJobManager {
             if cancel_flag.load(Ordering::Relaxed) {
                 if !results.is_empty() {
                     let recognized = results.len();
-                    mgr.partials.lock().unwrap().insert(
+                    mgr.partials.lock().unwrap_or_else(|e| e.into_inner()).insert(
                         jid.clone(),
                         PendingPartialCommit {
                             file_path: req.file_path.clone(),
@@ -2611,7 +2639,7 @@ impl OcrJobManager {
                             results,
                         },
                     );
-                    let mut g = mgr.jobs.lock().unwrap();
+                    let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = g.get_mut(&jid) {
                         s.status = "cancelled_pending_choice".to_string();
                         s.can_keep_partial = true;
@@ -2623,19 +2651,19 @@ impl OcrJobManager {
                     }
                 } else {
                     let _ = fs::remove_file(&backup_path);
-                    let mut g = mgr.jobs.lock().unwrap();
+                    let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = g.get_mut(&jid) {
                         s.status = "cancelled".to_string();
                         s.message = "OCR cancelled".to_string();
                     }
                 }
-                mgr.cancels.lock().unwrap().remove(&jid);
+                mgr.cancels.lock().unwrap_or_else(|e| e.into_inner()).remove(&jid);
                 return;
             }
 
             if results.is_empty() {
                 let _ = fs::remove_file(&backup_path);
-                let mut g = mgr.jobs.lock().unwrap();
+                let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = g.get_mut(&jid) {
                     s.status = "done".to_string();
                     s.percent = 100;
@@ -2647,12 +2675,12 @@ impl OcrJobManager {
                         skipped_count
                     );
                 }
-                mgr.cancels.lock().unwrap().remove(&jid);
+                mgr.cancels.lock().unwrap_or_else(|e| e.into_inner()).remove(&jid);
                 return;
             }
 
             {
-                let mut g = mgr.jobs.lock().unwrap();
+                let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(s) = g.get_mut(&jid) {
                     s.percent = 95;
                     s.message = "Embedding searchable invisible text layer...".to_string();
@@ -2683,7 +2711,7 @@ impl OcrJobManager {
                     let recognized = results.len();
                     let elapsed_ms = start_t.elapsed().as_millis() as u64;
                     let avg_ms = elapsed_ms / (recognized.max(1) as u64);
-                    let mut g = mgr.jobs.lock().unwrap();
+                    let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = g.get_mut(&jid) {
                         s.status = "done".to_string();
                         s.percent = 100;
@@ -2708,7 +2736,7 @@ impl OcrJobManager {
                     }
                 }
                 Err(e) => {
-                    let mut g = mgr.jobs.lock().unwrap();
+                    let mut g = mgr.jobs.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = g.get_mut(&jid) {
                         s.status = "error".to_string();
                         s.error = Some(e.clone());
@@ -2716,7 +2744,7 @@ impl OcrJobManager {
                     }
                 }
             }
-            mgr.cancels.lock().unwrap().remove(&jid);
+            mgr.cancels.lock().unwrap_or_else(|e| e.into_inner()).remove(&jid);
         });
 
         Ok(job_id)

@@ -230,7 +230,7 @@ enum UserEvent {
 }
 
 struct SafeResponder {
-    inner: RequestAsyncResponder,
+    inner: Option<RequestAsyncResponder>,
     #[cfg(target_os = "macos")]
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 }
@@ -238,16 +238,18 @@ struct SafeResponder {
 impl SafeResponder {
     fn new(inner: RequestAsyncResponder, _proxy: tao::event_loop::EventLoopProxy<UserEvent>) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
             #[cfg(target_os = "macos")]
             proxy: _proxy,
         }
     }
 
-    fn respond(self, resp: Response<Cow<'static, [u8]>>) {
+    fn respond(mut self, resp: Response<Cow<'static, [u8]>>) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
         #[cfg(target_os = "macos")]
         {
-            let inner = self.inner;
             let _ = self.proxy.send_event(UserEvent::RespondAsync(Box::new(move || {
                 inner.respond(resp);
             })));
@@ -255,13 +257,43 @@ impl SafeResponder {
         #[cfg(not(target_os = "windows"))]
         #[cfg(not(target_os = "macos"))]
         {
-            self.inner.respond(resp);
+            inner.respond(resp);
         }
         #[cfg(target_os = "windows")]
         {
-            self.inner.respond(resp);
+            inner.respond(resp);
         }
     }
+}
+
+impl Drop for SafeResponder {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            let resp = json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "ok": false, "error": "Internal PDF worker error (recovered safely)" }),
+            );
+            #[cfg(target_os = "macos")]
+            {
+                let _ = self.proxy.send_event(UserEvent::RespondAsync(Box::new(move || {
+                    inner.respond(resp);
+                })));
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                inner.respond(resp);
+            }
+        }
+    }
+}
+
+fn spawn_guarded<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    });
 }
 
 fn normalize_local_file_path(raw: &str) -> String {
@@ -459,7 +491,7 @@ impl BackgroundJobRegistry {
             message: msg.to_string(),
             ..Default::default()
         };
-        let mut g = self.jobs.lock().unwrap();
+        let mut g = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         // Prune finished jobs beyond 24
         if g.len() > 24 {
             let done_ids: Vec<String> = g
@@ -486,17 +518,17 @@ impl BackgroundJobRegistry {
     where
         F: FnOnce(&mut JobProgressSnapshot),
     {
-        if let Some(entry) = self.jobs.lock().unwrap().get_mut(id) {
+        if let Some(entry) = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
             f(&mut entry.snap);
         }
     }
 
     fn get(&self, id: &str) -> Option<JobProgressSnapshot> {
-        self.jobs.lock().unwrap().get(id).map(|e| e.snap.clone())
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|e| e.snap.clone())
     }
 
     fn cancel(&self, id: &str) -> bool {
-        if let Some(entry) = self.jobs.lock().unwrap().get_mut(id) {
+        if let Some(entry) = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
             entry.cancelled.store(true, Ordering::SeqCst);
             if entry.snap.status == "running" {
                 entry.snap.status = "cancelled".to_string();
@@ -527,13 +559,13 @@ impl FileStreamRegistry {
     fn register(&self, file_path: &str) -> String {
         let norm = PdfWorkspaceEngine::normalize_key(file_path);
         {
-            let p2i = self.path_to_id.lock().unwrap();
+            let p2i = self.path_to_id.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(id) = p2i.get(&norm) {
                 return id.clone();
             }
         }
         let id = format!("doc_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.path_to_id.lock().unwrap().insert(norm, id.clone());
+        self.path_to_id.lock().unwrap_or_else(|e| e.into_inner()).insert(norm, id.clone());
         self.id_to_path
             .lock()
             .unwrap()
@@ -542,20 +574,20 @@ impl FileStreamRegistry {
     }
 
     fn resolve(&self, id: &str) -> Option<String> {
-        self.id_to_path.lock().unwrap().get(id).cloned()
+        self.id_to_path.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
 
     fn unregister_by_path(&self, file_path: &str) {
         let norm = PdfWorkspaceEngine::normalize_key(file_path);
-        if let Some(id) = self.path_to_id.lock().unwrap().remove(&norm) {
-            self.id_to_path.lock().unwrap().remove(&id);
+        if let Some(id) = self.path_to_id.lock().unwrap_or_else(|e| e.into_inner()).remove(&norm) {
+            self.id_to_path.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         }
     }
 
     fn unregister_by_id(&self, id: &str) -> Option<String> {
-        if let Some(fp) = self.id_to_path.lock().unwrap().remove(id) {
+        if let Some(fp) = self.id_to_path.lock().unwrap_or_else(|e| e.into_inner()).remove(id) {
             let norm = PdfWorkspaceEngine::normalize_key(&fp);
-            self.path_to_id.lock().unwrap().remove(&norm);
+            self.path_to_id.lock().unwrap_or_else(|e| e.into_inner()).remove(&norm);
             return Some(fp);
         }
         None
@@ -1490,25 +1522,25 @@ const INIT_BRIDGE_SCRIPT: &str = r#"
 
   window.pdfforgeOcr = {
     detectScanned: function (filePath, page) {
-      return api('ocr/detectScanned', { filePath: filePath, page: page });
+      return apiPostJson('/ocr/detectScanned', { filePath: filePath, page: page });
     },
     inspectRange: function (filePath, pages) {
-      return api('ocr/inspectRange', { filePath: filePath, pages: pages });
+      return apiPostJson('/ocr/inspectRange', { filePath: filePath, pages: pages });
     },
     languages: function () {
-      return api('ocr/languages', {});
+      return apiPostJson('/ocr/languages', {});
     },
     start: function (req) {
-      return api('ocr/start', req);
+      return apiPostJson('/ocr/start', req);
     },
     status: function (jobId) {
-      return api('ocr/status', { jobId: jobId });
+      return apiPostJson('/ocr/status', { jobId: jobId });
     },
     cancel: function (jobId) {
-      return api('ocr/cancel', { jobId: jobId });
+      return apiPostJson('/ocr/cancel', { jobId: jobId });
     },
     resolveCancel: function (jobId, keepPartial) {
-      return api('ocr/resolveCancel', { jobId: jobId, keepPartial: !!keepPartial });
+      return apiPostJson('/ocr/resolveCancel', { jobId: jobId, keepPartial: !!keepPartial });
     }
   };
 
@@ -1583,7 +1615,7 @@ fn handle_api_request(
 ) {
     match uri_path {
         "/__rust_api__/dialog/openFile" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = dialogs::open_file_dialog();
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -1591,7 +1623,7 @@ fn handle_api_request(
         "/__rust_api__/dialog/openMultipleFiles" => {
             let payload: Option<OpenMultipleDialogPayload> = serde_json::from_slice(&body).ok();
             let title = payload.and_then(|p| p.title);
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = dialogs::open_multiple_files_dialog_titled(title.as_deref());
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -1599,7 +1631,7 @@ fn handle_api_request(
         "/__rust_api__/dialog/saveFileDialog" => {
             let payload: Option<SaveDialogPayload> = serde_json::from_slice(&body).ok();
             let default_name = payload.and_then(|p| p.default_name);
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = dialogs::save_file_dialog(default_name.as_deref());
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -1611,7 +1643,7 @@ fn handle_api_request(
                     let norm_path = normalize_local_file_path(&p.file_path);
                     let ws = pdf_workspace.clone();
                     let reg = stream_registry.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let t0 = std::time::Instant::now();
                         let meta = match fs::metadata(&norm_path) {
                             Ok(m) => m,
@@ -1741,7 +1773,7 @@ fn handle_api_request(
             match serde_json::from_slice::<RustRenderPagePayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let t0 = std::time::Instant::now();
                         let tile = p.tile.map(|t| (t[0], t[1], t[2].max(1) as u32, t[3].max(1) as u32));
                         match ws.render_page_fast_cached(
@@ -1785,14 +1817,14 @@ fn handle_api_request(
             }
         }
         "/__rust_api__/cache/stats" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let st = disk_cache::get_disk_cache_stats();
                 responder.respond(json_response(StatusCode::OK, &st));
             });
         }
         "/__rust_api__/cache/clear" => {
             let ws = pdf_workspace.clone();
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 ws.set_render_budget_mb(300);
                 let st = disk_cache::clear_disk_cache();
                 responder.respond(json_response(StatusCode::OK, &st));
@@ -1808,7 +1840,7 @@ fn handle_api_request(
         "/__rust_api__/cache/getRender" => {
             match serde_json::from_slice::<DiskRenderGetPayload>(&body) {
                 Ok(p) => {
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         if let Some(png) = disk_cache::read_cached_render(
                             &p.file_hash,
                             p.revision,
@@ -1873,7 +1905,7 @@ fn handle_api_request(
             match serde_json::from_slice::<IndexedSearchPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match disk_cache::search_file_indexed(&ws, &p.file_path, &p.query, p.case_sensitive) {
                             Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
                             Err(err) => responder.respond(json_response(
@@ -1903,7 +1935,7 @@ fn handle_api_request(
                     let jobs = job_registry.clone();
                     let ws = pdf_workspace.clone();
                     let jid = job_id.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let res: Result<(), String> = (|| {
                             match p.kind.as_str() {
                                 "combine" => {
@@ -2143,25 +2175,36 @@ fn handle_api_request(
                 Ok(p) => {
                     let norm_path = normalize_local_file_path(&p.file_path);
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.load_or_sync_from_disk(&norm_path) {
-                        Ok(bytes) => {
-                            let file_name = std::path::Path::new(&norm_path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "document.pdf".to_string());
-                            let sz = bytes.len() as u64;
-                            responder.respond(binary_response(
-                                StatusCode::OK,
-                                bytes,
-                                &file_name,
-                                sz,
-                            ));
+                    spawn_guarded(move || {
+                        if let Ok(meta) = fs::metadata(&norm_path) {
+                            if meta.len() > 256 * 1024 * 1024 {
+                                responder.respond(json_response(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    &json!({ "error": "File exceeds 256 MB single-shot read cap; use HTTP Range streaming." }),
+                                ));
+                                return;
+                            }
                         }
-                        Err(err) => {
-                            responder.respond(json_response(
-                                StatusCode::BAD_REQUEST,
-                                &json!({ "error": err }),
-                            ));
+                        match ws.load_or_sync_from_disk(&norm_path) {
+                            Ok(bytes) => {
+                                let file_name = std::path::Path::new(&norm_path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "document.pdf".to_string());
+                                let sz = bytes.len() as u64;
+                                responder.respond(binary_response(
+                                    StatusCode::OK,
+                                    bytes,
+                                    &file_name,
+                                    sz,
+                                ));
+                            }
+                            Err(err) => {
+                                responder.respond(json_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &json!({ "error": err }),
+                                ));
+                            }
                         }
                     });
                 }
@@ -2191,7 +2234,7 @@ fn handle_api_request(
             }
 
             let ws = pdf_workspace.clone();
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 ws.unmap_for_save(&file_path);
                 let res = pdf_engine::save_pdf_file(&file_path, &body);
                 if res.success {
@@ -2221,7 +2264,7 @@ fn handle_api_request(
                 .collect();
 
             let cache_dir = {
-                let guard = store.lock().unwrap();
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
                 guard.user_data_dir().join("autosave")
             };
             let _ = fs::create_dir_all(&cache_dir);
@@ -2243,58 +2286,58 @@ fn handle_api_request(
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
         }
         "/__rust_api__/store/getRecentFiles" => {
-            let list = store.lock().unwrap().get_recent_files();
+            let list = store.lock().unwrap_or_else(|e| e.into_inner()).get_recent_files();
             responder.respond(json_response(StatusCode::OK, &list));
         }
         "/__rust_api__/store/addRecentFile" => {
             if let Ok(file) = serde_json::from_slice::<RecentFile>(&body) {
-                let list = store.lock().unwrap().add_recent_file(file);
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).add_recent_file(file);
                 responder.respond(json_response(StatusCode::OK, &list));
             } else {
-                let list = store.lock().unwrap().get_recent_files();
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).get_recent_files();
                 responder.respond(json_response(StatusCode::OK, &list));
             }
         }
         "/__rust_api__/store/removeRecentFile" => {
             if let Ok(p) = serde_json::from_slice::<PathPayload>(&body) {
-                let list = store.lock().unwrap().remove_recent_file(&p.file_path);
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).remove_recent_file(&p.file_path);
                 responder.respond(json_response(StatusCode::OK, &list));
             } else {
-                let list = store.lock().unwrap().get_recent_files();
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).get_recent_files();
                 responder.respond(json_response(StatusCode::OK, &list));
             }
         }
         "/__rust_api__/store/clearRecentFiles" => {
-            store.lock().unwrap().clear_recent_files();
+            store.lock().unwrap_or_else(|e| e.into_inner()).clear_recent_files();
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
         }
         "/__rust_api__/store/toggleFavoriteFile" => {
             if let Ok(p) = serde_json::from_slice::<PathPayload>(&body) {
-                let list = store.lock().unwrap().toggle_favorite_file(&p.file_path);
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).toggle_favorite_file(&p.file_path);
                 responder.respond(json_response(StatusCode::OK, &list));
             } else {
-                let list = store.lock().unwrap().get_recent_files();
+                let list = store.lock().unwrap_or_else(|e| e.into_inner()).get_recent_files();
                 responder.respond(json_response(StatusCode::OK, &list));
             }
         }
         "/__rust_api__/store/getSettings" => {
-            let settings = store.lock().unwrap().get_settings();
+            let settings = store.lock().unwrap_or_else(|e| e.into_inner()).get_settings();
             responder.respond(json_response(StatusCode::OK, &settings));
         }
         "/__rust_api__/store/updateSettings" => {
             if let Ok(partial) = serde_json::from_slice::<PartialAppSettings>(&body) {
-                let updated = store.lock().unwrap().update_settings(partial);
+                let updated = store.lock().unwrap_or_else(|e| e.into_inner()).update_settings(partial);
                 pdf_workspace.set_render_budget_mb(updated.memory_budget_mb);
                 disk_cache::set_disk_cache_limit_mb(updated.disk_cache_limit_mb);
                 responder.respond(json_response(StatusCode::OK, &updated));
             } else {
-                let settings = store.lock().unwrap().get_settings();
+                let settings = store.lock().unwrap_or_else(|e| e.into_inner()).get_settings();
                 responder.respond(json_response(StatusCode::OK, &settings));
             }
         }
         "/__rust_api__/store/getFileState" => {
             if let Ok(p) = serde_json::from_slice::<PathPayload>(&body) {
-                let state = store.lock().unwrap().get_file_state(&p.file_path);
+                let state = store.lock().unwrap_or_else(|e| e.into_inner()).get_file_state(&p.file_path);
                 responder.respond(json_response(StatusCode::OK, &state));
             } else {
                 responder.respond(json_response(StatusCode::OK, &Option::<FileState>::None));
@@ -2302,27 +2345,27 @@ fn handle_api_request(
         }
         "/__rust_api__/store/saveFileState" => {
             if let Ok(p) = serde_json::from_slice::<SaveFileStatePayload>(&body) {
-                store.lock().unwrap().save_file_state(&p.file_path, p.state);
+                store.lock().unwrap_or_else(|e| e.into_inner()).save_file_state(&p.file_path, p.state);
             }
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
         }
         "/__rust_api__/store/saveSession" => {
             if let Ok(session) = serde_json::from_slice::<SessionState>(&body) {
-                store.lock().unwrap().save_session(&session);
+                store.lock().unwrap_or_else(|e| e.into_inner()).save_session(&session);
             }
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
         }
         "/__rust_api__/store/getSession" => {
-            let session = store.lock().unwrap().get_session();
+            let session = store.lock().unwrap_or_else(|e| e.into_inner()).get_session();
             responder.respond(json_response(StatusCode::OK, &session));
         }
         "/__rust_api__/signatures/list" => {
-            let list = store.lock().unwrap().list_signatures();
+            let list = store.lock().unwrap_or_else(|e| e.into_inner()).list_signatures();
             responder.respond(json_response(StatusCode::OK, &list));
         }
         "/__rust_api__/signatures/save" => {
             if let Ok(p) = serde_json::from_slice::<SaveSignaturePayload>(&body) {
-                let ok = store.lock().unwrap().save_signature(&p.id, &p.base64_png);
+                let ok = store.lock().unwrap_or_else(|e| e.into_inner()).save_signature(&p.id, &p.base64_png);
                 responder.respond(json_response(StatusCode::OK, &ok));
             } else {
                 responder.respond(json_response(StatusCode::OK, &false));
@@ -2330,7 +2373,7 @@ fn handle_api_request(
         }
         "/__rust_api__/signatures/delete" => {
             if let Ok(p) = serde_json::from_slice::<DeleteSignaturePayload>(&body) {
-                let ok = store.lock().unwrap().delete_signature(&p.id);
+                let ok = store.lock().unwrap_or_else(|e| e.into_inner()).delete_signature(&p.id);
                 responder.respond(json_response(StatusCode::OK, &ok));
             } else {
                 responder.respond(json_response(StatusCode::OK, &false));
@@ -2388,7 +2431,7 @@ fn handle_api_request(
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
         }
         "/__rust_api__/app/pickUpdatePackage" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = dialogs::pick_update_package();
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -2422,7 +2465,7 @@ fn handle_api_request(
                 .ok()
                 .and_then(|v| v.get("manifestUrl").and_then(|u| u.as_str()).map(|s| s.to_string()))
                 .unwrap_or_default();
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = installer::check_release_manifest(&manifest_url);
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -2432,7 +2475,7 @@ fn handle_api_request(
                 .ok()
                 .and_then(|v| v.get("downloadUrl").and_then(|u| u.as_str()).map(|s| s.to_string()))
                 .unwrap_or_default();
-            thread::spawn(move || match installer::download_and_apply_update(&download_url) {
+            spawn_guarded(move || match installer::download_and_apply_update(&download_url) {
                 Ok(()) => {
                     responder.respond(json_response(
                         StatusCode::OK,
@@ -2450,7 +2493,7 @@ fn handle_api_request(
             });
         }
         "/__rust_api__/app/repairInstallation" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 match installer::repair_installation() {
                     Ok(path) => responder.respond(json_response(
                         StatusCode::OK,
@@ -2480,7 +2523,7 @@ fn handle_api_request(
             }
         }
         "/__rust_api__/print/listPrinters" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let printers = dialogs::list_printers();
                 responder.respond(json_response(StatusCode::OK, &printers));
             });
@@ -2489,7 +2532,7 @@ fn handle_api_request(
             let payload: Result<DirectPrintPayload, _> = serde_json::from_slice(&body);
             match payload {
                 Ok(p) => {
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match dialogs::print_images_direct(
                             &p.printer_name,
                             p.copies,
@@ -2523,7 +2566,7 @@ fn handle_api_request(
         "/__rust_api__/app/ready" => {
             webview_ready.store(true, Ordering::SeqCst);
             let drained: Vec<String> = {
-                let mut q = pending_boot_open_files.lock().unwrap();
+                let mut q = pending_boot_open_files.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *q)
             };
             responder.respond(json_response(
@@ -2535,7 +2578,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatPagePayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.get_page_layout(&p.file_path, p.page) {
+                    spawn_guarded(move || match ws.get_page_layout(&p.file_path, p.page) {
                         Ok(layout) => responder.respond(json_response(StatusCode::OK, &*layout)),
                         Err(e) => responder.respond(json_response(
                             StatusCode::BAD_REQUEST,
@@ -2553,7 +2596,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatHitPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.hit_test(&p.file_path, p.page, p.x, p.y) {
+                    spawn_guarded(move || match ws.hit_test(&p.file_path, p.page, p.x, p.y) {
                         Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
                         Err(e) => responder.respond(json_response(
                             StatusCode::BAD_REQUEST,
@@ -2571,7 +2614,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatSelectionPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.get_selection_rects(&p.file_path, p.page, p.start_char, p.end_char)
                         {
                             Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
@@ -2592,7 +2635,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatPagePayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.get_objects(&p.file_path, p.page) {
+                    spawn_guarded(move || match ws.get_objects(&p.file_path, p.page) {
                         Ok(objs) => responder.respond(json_response(StatusCode::OK, &*objs)),
                         Err(e) => responder.respond(json_response(
                             StatusCode::BAD_REQUEST,
@@ -2610,7 +2653,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatShapeReflowPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let bytes_opt = ws.get_working_bytes(&p.file_path).ok();
                         let lo_opt = bytes_opt
                             .as_ref()
@@ -2645,7 +2688,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatEditTextPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.req.page, |doc| {
                             commit_edit_text_block(doc, &p.req)
                         }) {
@@ -2678,7 +2721,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatShapeCommitPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.req.page, |doc| {
                             commit_shape_operation(doc, &p.req).map(|_| None)
                         }) {
@@ -2707,7 +2750,7 @@ fn handle_api_request(
         "/__rust_api__/acrobat/undo" => match serde_json::from_slice::<PathPayload>(&body) {
             Ok(p) => {
                 let ws = pdf_workspace.clone();
-                thread::spawn(move || match ws.undo(&p.file_path) {
+                spawn_guarded(move || match ws.undo(&p.file_path) {
                     Ok((_, rev, can_undo, can_redo)) => responder.respond(json_response(
                         StatusCode::OK,
                         &json!({
@@ -2731,7 +2774,7 @@ fn handle_api_request(
         "/__rust_api__/acrobat/redo" => match serde_json::from_slice::<PathPayload>(&body) {
             Ok(p) => {
                 let ws = pdf_workspace.clone();
-                thread::spawn(move || match ws.redo(&p.file_path) {
+                spawn_guarded(move || match ws.redo(&p.file_path) {
                     Ok((_, rev, can_undo, can_redo)) => responder.respond(json_response(
                         StatusCode::OK,
                         &json!({
@@ -2756,7 +2799,7 @@ fn handle_api_request(
             match serde_json::from_slice::<PathPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || match ws.get_working_bytes(&p.file_path) {
+                    spawn_guarded(move || match ws.get_working_bytes(&p.file_path) {
                         Ok(bytes) => {
                             let sz = bytes.len() as u64;
                             responder.respond(binary_response(
@@ -2779,7 +2822,7 @@ fn handle_api_request(
             }
         }
         "/__rust_api__/acrobat/listFonts" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let catalog = font_shaper::list_font_catalog();
                 responder.respond(json_response(StatusCode::OK, &catalog));
             });
@@ -2788,7 +2831,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatImageCommitPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.req.page, |doc| {
                             pdf_objects::commit_image_operation(doc, &p.req).map(|_| None)
                         }) {
@@ -2818,7 +2861,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatPagePayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
                             let lo = lopdf::Document::load_mem(&bytes)
                                 .map_err(|e| format!("Failed parsing PDF: {}", e))?;
@@ -2840,7 +2883,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatAnnotationCommitPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.req.page, |doc| {
                             pdf_annots::commit_annotation_op(doc, &p.req).map(|_| None)
                         }) {
@@ -2870,7 +2913,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatFormFieldPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.req.page, |doc| {
                             pdf_annots::update_form_field(doc, &p.req).map(|_| None)
                         }) {
@@ -2895,7 +2938,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatRotatePagesPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::rotate_pages(doc, &p.pages, p.delta_deg).map(|_| None)
                         }) {
@@ -2920,7 +2963,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatRedactPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_mutation(&p.file_path, p.page, |doc| {
                             pdf_annots::apply_redactions(doc, p.page, &p.rects_vp).map(|_| None)
                         }) {
@@ -2945,7 +2988,7 @@ fn handle_api_request(
             match serde_json::from_slice::<PathPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
                             let lo = lopdf::Document::load_mem(&bytes)
                                 .map_err(|e| format!("Failed parsing PDF: {}", e))?;
@@ -2967,7 +3010,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatDocPropsPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::set_doc_properties(doc, &p.props).map(|_| None)
                         }) {
@@ -2992,7 +3035,7 @@ fn handle_api_request(
             match serde_json::from_slice::<PathPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
                             let lo = lopdf::Document::load_mem(&bytes)
                                 .map_err(|e| format!("Failed parsing PDF: {}", e))?;
@@ -3014,7 +3057,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatBookmarksPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::write_bookmarks(doc, &p.bookmarks).map(|_| None)
                         }) {
@@ -3039,7 +3082,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatPageLabelsPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::set_page_labels(doc, &p.style, &p.prefix, p.start_num)
                                 .map(|_| None)
@@ -3065,7 +3108,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatCropPagesPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::crop_pages_real(doc, &p.pages, p.margins).map(|_| None)
                         }) {
@@ -3090,7 +3133,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatPageOpPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ws.push_doc_mutation(&p.file_path, |doc| {
                             pdf_annots::apply_page_operation(doc, &p.req).map(|_| None)
                         }) {
@@ -3115,7 +3158,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatExtractPagesPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let out = ws.get_working_bytes(&p.file_path).and_then(|bytes| {
                             let lo = lopdf::Document::load_mem(&bytes)
                                 .map_err(|e| format!("Failed parsing PDF: {}", e))?;
@@ -3138,7 +3181,7 @@ fn handle_api_request(
         "/__rust_api__/acrobat/combinePdfs" => {
             match serde_json::from_slice::<AcrobatCombinePayload>(&body) {
                 Ok(p) => {
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let res = pdf_annots::combine_pdfs_to_bytes(&p.paths).and_then(|bytes| {
                             pdf_annots::save_pdf_verified(&bytes, None, &p.output_path, false, true)?;
                             Ok(())
@@ -3159,7 +3202,7 @@ fn handle_api_request(
             match serde_json::from_slice::<AcrobatSaveVerifiedPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let target = p.target_path.unwrap_or_else(|| p.file_path.clone());
                         match ws.save_verified_to_disk(&p.file_path, &target, p.incremental, p.compact) {
                             Ok((rev, used_inc)) => responder.respond(json_response(
@@ -3182,7 +3225,7 @@ fn handle_api_request(
         "/__rust_api__/acrobat/verifyPdf" => {
             match serde_json::from_slice::<PathPayload>(&body) {
                 Ok(p) => {
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         let out = (|| -> Result<serde_json::Value, String> {
                             let bytes = fs::read(&p.file_path)
                                 .map_err(|e| format!("Failed reading '{}': {}", p.file_path, e))?;
@@ -3259,7 +3302,7 @@ fn handle_api_request(
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": ok })));
         }
         "/__rust_api__/ocr/languages" => {
-            thread::spawn(move || {
+            spawn_guarded(move || {
                 let res = ocr::list_available_languages();
                 responder.respond(json_response(StatusCode::OK, &res));
             });
@@ -3268,7 +3311,7 @@ fn handle_api_request(
             match serde_json::from_slice::<OcrDetectPayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ocr::inspect_page_scan_status(&ws, &p.file_path, p.page) {
                             Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
                             Err(e) => responder.respond(json_response(
@@ -3288,7 +3331,7 @@ fn handle_api_request(
             match serde_json::from_slice::<OcrInspectRangePayload>(&body) {
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
-                    thread::spawn(move || {
+                    spawn_guarded(move || {
                         match ocr::inspect_pages_range_status(&ws, &p.file_path, &p.pages) {
                             Ok(res) => responder.respond(json_response(StatusCode::OK, &res)),
                             Err(e) => responder.respond(json_response(
@@ -3309,7 +3352,7 @@ fn handle_api_request(
                 Ok(req) => {
                     let ws = Arc::new(pdf_workspace.clone());
                     let mgr = ocr_jobs.clone();
-                    thread::spawn(move || match mgr.start_job(ws, req) {
+                    spawn_guarded(move || match mgr.start_job(ws, req) {
                         Ok(job_id) => responder.respond(json_response(
                             StatusCode::OK,
                             &json!({ "ok": true, "jobId": job_id }),
@@ -3349,7 +3392,7 @@ fn handle_api_request(
                 Ok(p) => {
                     let ws = pdf_workspace.clone();
                     let mgr = ocr_jobs.clone();
-                    thread::spawn(move || match mgr.resolve_cancel(&ws, &p.job_id, p.keep_partial) {
+                    spawn_guarded(move || match mgr.resolve_cancel(&ws, &p.job_id, p.keep_partial) {
                         Ok(snap) => responder.respond(json_response(StatusCode::OK, &snap)),
                         Err(e) => responder.respond(json_response(
                             StatusCode::OK,
@@ -3390,7 +3433,7 @@ fn handle_api_request(
         }
         "/__rust_api__/diag" => {
             let msg = String::from_utf8_lossy(&body).to_string();
-            let log_path = store.lock().unwrap().user_data_dir().join("startup_diag.log");
+            let log_path = store.lock().unwrap_or_else(|e| e.into_inner()).user_data_dir().join("startup_diag.log");
             let prev = fs::read_to_string(&log_path).unwrap_or_default();
             let _ = fs::write(&log_path, format!("{}{}\n", prev, msg));
             responder.respond(json_response(StatusCode::OK, &json!({ "ok": true })));
@@ -3412,7 +3455,34 @@ fn main() {
 
     let perf_bench_cfg = perf::parse_perf_bench_args();
     let store = Arc::new(Mutex::new(AppDataStore::new()));
-    let user_data_dir = store.lock().unwrap().user_data_dir().clone();
+    let user_data_dir = store.lock().unwrap_or_else(|e| e.into_inner()).user_data_dir().clone();
+
+    // Install diagnostic panic hook so any unexpected worker panic is captured instead of crashing silently
+    let panic_log_path = user_data_dir.join("startup_diag.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic".to_string()
+        };
+        let line = format!("RUST_PANIC [{}]: {}\n", loc, msg);
+        #[cfg(debug_assertions)]
+        eprintln!("{}", line);
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&panic_log_path)
+        {
+            use std::io::Write as _;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }));
     let cli_pdfs = if perf_bench_cfg.is_some() {
         Vec::new()
     } else {
@@ -3436,13 +3506,13 @@ fn main() {
     {
         ensure_webview2_loader_loaded(&user_data_dir);
         let pdfium_dir = user_data_dir.clone();
-        std::thread::spawn(move || {
+        spawn_guarded(move || {
             ensure_pdfium_dll_present(&pdfium_dir);
         });
     }
     let pdf_workspace = PdfWorkspaceEngine::new();
     {
-        let init_settings = store.lock().unwrap().get_settings();
+        let init_settings = store.lock().unwrap_or_else(|e| e.into_inner()).get_settings();
         pdf_workspace.set_render_budget_mb(init_settings.memory_budget_mb);
         disk_cache::set_disk_cache_limit_mb(init_settings.disk_cache_limit_mb);
     }
@@ -3485,7 +3555,7 @@ fn main() {
     let web_data_dir = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .map(|p| p.join("PDFForge").join("webview2"))
-        .unwrap_or_else(|| store.lock().unwrap().user_data_dir().join("webview2"));
+        .unwrap_or_else(|| store.lock().unwrap_or_else(|e| e.into_inner()).user_data_dir().join("webview2"));
     let _ = fs::create_dir_all(&web_data_dir);
     let mut web_context = WebContext::new(Some(web_data_dir));
 
@@ -3628,7 +3698,7 @@ fn main() {
                 }
 
                 let id_owned = clean_id.to_string();
-                thread::spawn(move || {
+                spawn_guarded(move || {
                     let Some(fp) = regs.resolve(&id_owned) else {
                         let resp = Response::builder()
                             .status(StatusCode::NOT_FOUND)
@@ -3668,7 +3738,16 @@ fn main() {
                     // Query-parameter range (?start=0&end=65535): returns standard 200 OK with exact byte slice
                     // (immune to macOS WKWebView custom-scheme Range header / 206 Partial Content quirks).
                     if let Some((start, end_incl)) = parse_query_byte_range(query_owned.as_deref(), total_len) {
-                        let chunk = backing[(start as usize)..=(end_incl as usize)].to_vec();
+                        let Some(slice) = backing.get((start as usize)..=(end_incl as usize)) else {
+                            let resp = Response::builder()
+                                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                .header("Content-Range", format!("bytes */{}", total_len))
+                                .body(Cow::Borrowed(&b""[..]))
+                                .unwrap();
+                            responder.respond(resp);
+                            return;
+                        };
+                        let chunk = slice.to_vec();
                         let chunk_len = chunk.len();
                         let resp = Response::builder()
                             .status(StatusCode::OK)
@@ -3684,7 +3763,16 @@ fn main() {
 
                     if let Some(ref rh) = range_hdr {
                         if let Some((start, end_incl)) = parse_byte_range(Some(rh), total_len) {
-                            let chunk = backing[(start as usize)..=(end_incl as usize)].to_vec();
+                            let Some(slice) = backing.get((start as usize)..=(end_incl as usize)) else {
+                                let resp = Response::builder()
+                                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                    .header("Content-Range", format!("bytes */{}", total_len))
+                                    .body(Cow::Borrowed(&b""[..]))
+                                    .unwrap();
+                                responder.respond(resp);
+                                return;
+                            };
+                            let chunk = slice.to_vec();
                             let chunk_len = chunk.len();
                             let resp = Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
@@ -3710,7 +3798,17 @@ fn main() {
                         }
                     }
 
-                    // Non-range fallback
+                    // Non-range fallback (refuse unchunked copies > 256 MB to avoid OOM)
+                    if total_len > 256 * 1024 * 1024 {
+                        let resp = Response::builder()
+                            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .header("Accept-Ranges", "bytes")
+                            .header("Content-Range", format!("bytes */{}", total_len))
+                            .body(Cow::Borrowed(&b"Range header required for large PDFs"[..]))
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    }
                     let bytes = backing.to_vec();
                     let resp = Response::builder()
                         .status(StatusCode::OK)
@@ -3851,7 +3949,7 @@ fn main() {
                         "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
                     );
                     let p_close = proxy_for_close.clone();
-                    std::thread::spawn(move || {
+                    spawn_guarded(move || {
                         std::thread::sleep(std::time::Duration::from_millis(400));
                         let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
                     });
@@ -3923,7 +4021,7 @@ fn main() {
                             "window.__pdfforgeRequestClose && window.__pdfforgeRequestClose();",
                         );
                         let p_close = proxy_for_close.clone();
-                        std::thread::spawn(move || {
+                        spawn_guarded(move || {
                             std::thread::sleep(std::time::Duration::from_millis(400));
                             let _ = p_close.send_event(UserEvent::CloseTimeoutFallback);
                         });
@@ -3935,7 +4033,7 @@ fn main() {
                 UserEvent::ConfirmClose(proceed, session_opt) => {
                     if proceed {
                         if let Some(session) = session_opt {
-                            store_for_close.lock().unwrap().save_session(&session);
+                            store_for_close.lock().unwrap_or_else(|e| e.into_inner()).save_session(&session);
                         }
                         #[cfg(target_os = "windows")]
                         win32_frame::hide_instantly_before_close(&window);
@@ -4037,7 +4135,7 @@ fn main() {
                                 ));
                             }
                         } else {
-                            let mut q = pending_boot_open_files.lock().unwrap();
+                            let mut q = pending_boot_open_files.lock().unwrap_or_else(|e| e.into_inner());
                             for p in &pdfs {
                                 if !q.iter().any(|x| x.eq_ignore_ascii_case(p)) {
                                     q.push(p.clone());
@@ -4079,7 +4177,7 @@ fn main() {
                             ));
                         }
                     } else {
-                        let mut q = pending_boot_open_files.lock().unwrap();
+                        let mut q = pending_boot_open_files.lock().unwrap_or_else(|e| e.into_inner());
                         for p in &pdfs {
                             if !q.iter().any(|x| x.eq_ignore_ascii_case(p)) {
                                 q.push(p.clone());

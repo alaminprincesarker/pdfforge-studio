@@ -665,6 +665,50 @@ fn test_real_sample_pdf_layout_cache_and_selection() {
 }
 
 #[test]
+fn test_layout_non_transitive_baselines_never_panic() {
+    // Regression test for Rust driftsort total-order panic (0xc0000409 in release):
+    // Characters whose baselines step by 1.5pt..2.0pt with decreasing X form a cycle
+    // under any epsilon comparator `|a.baseline - b.baseline| <= 2.5`.
+    // Simulate a dense scanned/OCR/math page with 60 characters stepping by 1.6pt in Y
+    // while descending in X (plus normal lines across multiple columns).
+    let mut ops = Vec::new();
+    for i in 0..60 {
+        let x = 520.0 - (i as f32) * 7.5;
+        let y = 740.0 - (i as f32) * 1.6;
+        ops.extend(text_op(x, y, 10.0, [0.0, 0.0, 0.0], "A"));
+    }
+    for row in 0..8 {
+        let base_y = 500.0 - (row as f32) * 16.0;
+        for col in 0..12 {
+            let jitter = ((row * 13 + col * 7) % 5) as f32 * 0.6 - 1.2;
+            ops.extend(text_op(
+                50.0 + (col as f32) * 40.0,
+                base_y + jitter,
+                11.0,
+                [0.0, 0.0, 0.0],
+                "W",
+            ));
+        }
+    }
+
+    let pdf_bytes = build_single_page_pdf([0, 0, 612, 792], 0, ops, vec![], false);
+    let path = temp_pdf_path("test_non_transitive_baselines.pdf");
+    std::fs::write(&path, &pdf_bytes).unwrap();
+
+    let engine = PdfWorkspaceEngine::new();
+    let layout = engine
+        .get_page_layout(path.to_str().unwrap(), 1)
+        .expect("layout extraction must never panic on wobbling baselines");
+    assert!(layout.chars.len() >= 100);
+    assert!(!layout.blocks.is_empty());
+
+    let sel = engine
+        .get_selection_rects(path.to_str().unwrap(), 1, 0, layout.chars.len() + 50)
+        .expect("out-of-bounds end_char must clamp safely");
+    assert!(!sel.rects.is_empty());
+}
+
+#[test]
 fn test_bundled_and_system_font_catalog_offline() {
     let catalog = crate::font_shaper::list_font_catalog();
     assert!(!catalog.is_empty(), "Font catalog must not be empty");
